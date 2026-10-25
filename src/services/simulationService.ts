@@ -5,10 +5,13 @@ import type {
   SimulationConfig,
   SimulationFrame,
   SimulationResult,
+  SimulationAffectedBuilding,
+  SimulationAffectedRoad,
+  RoadInundationStatus,
   VillageDataset,
 } from '../types/village';
 import type { FeatureCollection, Polygon } from 'geojson';
-import { doesLineStringIntersectPolygonRing } from '../utils/geoUtils';
+import { doesLineStringIntersectPolygonRing, isPointInPolygonRing } from '../utils/geoUtils';
 
 /**
  * Standard contract for Village Flood Hydrological Simulation Engines.
@@ -94,23 +97,259 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
     const totalHours = Math.max(config.rainfallDuration_hours + 4, 10);
     const frames: SimulationFrame[] = [];
 
-    // Precompute static plinth elevations to avoid redundant property lookups in hourly loop
-    const buildingPlinths = dataset.buildings.features.map((bld) => ({
-      id: bld.properties.id,
-      name: bld.properties.name,
-      type: bld.properties.type,
-      groundElevation_m: bld.properties.groundElevation_m,
-      plinthTop: bld.properties.groundElevation_m + (bld.properties.plinthHeight_cm / 100),
-    }));
+    const centerLng = dataset.center[0];
+    const centerLat = dataset.center[1];
 
-    // Precompute road elevations
-    const roadElevations = dataset.roads.features.map((rd) => ({
-      id: rd.properties.id,
-      name: rd.properties.name,
-      elevation_m: rd.properties.elevation_m,
-      type: rd.properties.type,
-      length_m: rd.properties.length_m || 100,
-    }));
+    // Precompute building geometries and plinths
+    const buildingMeta = (dataset.buildings?.features || []).map((bld) => {
+      const rawCoords = bld.geometry?.coordinates;
+      const bldRings: Array<Array<[number, number]>> =
+        bld.geometry?.type === 'Polygon'
+          ? (rawCoords as any)
+          : bld.geometry?.type === 'MultiPolygon'
+          ? (rawCoords as any).map((p: any) => p[0])
+          : [];
+      let center: [number, number] = [centerLng, centerLat];
+      const firstRing = bldRings[0];
+      if (firstRing && firstRing.length > 0) {
+        let sx = 0, sy = 0;
+        for (const pt of firstRing) { sx += pt[0]; sy += pt[1]; }
+        center = [sx / firstRing.length, sy / firstRing.length];
+      }
+      const groundElevation_m = bld.properties.groundElevation_m ?? bld.properties.ground_elevation_m ?? (dataset.elevation_m || 25);
+      const plinthHeight_m = (bld.properties.plinthHeight_cm || 45) / 100;
+      const plinthTop = groundElevation_m + plinthHeight_m;
+
+      return {
+        id: bld.properties.id,
+        name: bld.properties.name,
+        type: bld.properties.type,
+        groundElevation_m,
+        plinthHeight_m,
+        plinthTop,
+        center,
+        rings: bldRings,
+        occupants: bld.properties.occupants || 0,
+      };
+    });
+
+    // Precompute road geometries and elevations
+    const roadMeta = (dataset.roads?.features || []).map((rd) => {
+      const rawCoords = rd.geometry?.coordinates;
+      const lines: Array<Array<[number, number]>> =
+        (rd.geometry as any)?.type === 'MultiLineString'
+          ? (rawCoords as any)
+          : rawCoords && rawCoords.length > 0
+          ? [rawCoords as any]
+          : [];
+      const elevation_m = rd.properties.elevation_m;
+      const length_m = rd.properties.length_m || 100;
+
+      return {
+        id: rd.properties.id,
+        name: rd.properties.name,
+        type: rd.properties.roadType || rd.properties.type,
+        elevation_m,
+        length_m,
+        lines,
+      };
+    });
+
+    // Helper to evaluate spatial building exposure
+    const evaluateBuildingsExposure = (
+      polys: FeatureCollection<Polygon, { depth_m: number; category: string }>,
+      waterSurfaceElevation: number
+    ) => {
+      const bldResult: SimulationAffectedBuilding[] = [];
+      const floodedIds: string[] = [];
+      const criticalFloodedNames: string[] = [];
+
+      for (const bld of buildingMeta) {
+        let maxDepth = 0;
+        let hasIntersection = false;
+
+        if (polys.features.length > 0) {
+          for (const poly of polys.features) {
+            const ring = poly.geometry.coordinates[0];
+            if (!ring || ring.length < 3) continue;
+            if (isPointInPolygonRing(bld.center, ring) || bld.rings.some((bR) => doesLineStringIntersectPolygonRing(bR, ring))) {
+              hasIntersection = true;
+              if (poly.properties.depth_m > maxDepth) {
+                maxDepth = poly.properties.depth_m;
+              }
+            }
+          }
+        }
+
+        if (!hasIntersection || maxDepth <= 0) {
+          bldResult.push({
+            id: bld.id,
+            name: bld.name,
+            type: bld.type,
+            depth_m: 0,
+            risk: 'safe',
+            groundElevation_m: bld.groundElevation_m,
+            plinthElevation_m: bld.plinthTop,
+            statusNote: 'Clear of simulated surface ponding',
+          });
+          continue;
+        }
+
+        const depthAbovePlinth = Math.max(0, Number((maxDepth - bld.plinthHeight_m).toFixed(2)));
+        let risk: 'safe' | 'low' | 'moderate' | 'severe' = 'safe';
+        let statusNote = '';
+
+        if (depthAbovePlinth > 0.45) {
+          risk = 'severe';
+          statusNote = `Severe inundation (${depthAbovePlinth.toFixed(2)}m above plinth, evacuation required)`;
+        } else if (depthAbovePlinth > 0.15) {
+          risk = 'moderate';
+          statusNote = `Moderate flooding (${depthAbovePlinth.toFixed(2)}m above plinth, ingress into dwelling)`;
+        } else if (depthAbovePlinth > 0) {
+          risk = 'low';
+          statusNote = `Shallow overtopping (${depthAbovePlinth.toFixed(2)}m above plinth)`;
+        } else {
+          risk = 'low';
+          statusNote = `Foundation waterlogged (${maxDepth.toFixed(2)}m ground depth, plinth protective)`;
+        }
+
+        if (depthAbovePlinth > 0) {
+          floodedIds.push(bld.id);
+          if (bld.type !== 'residential') {
+            criticalFloodedNames.push(bld.name);
+          }
+        }
+
+        bldResult.push({
+          id: bld.id,
+          name: bld.name,
+          type: bld.type,
+          depth_m: depthAbovePlinth,
+          risk,
+          groundElevation_m: bld.groundElevation_m,
+          plinthElevation_m: bld.plinthTop,
+          statusNote,
+        });
+      }
+
+      return { bldResult, floodedIds, criticalFloodedNames };
+    };
+
+    // Helper to evaluate spatial road exposure with 4-state classification
+    const evaluateRoadsExposure = (
+      polys: FeatureCollection<Polygon, { depth_m: number; category: string }>,
+      waterSurfaceElevation: number,
+      hasBoundary: boolean
+    ) => {
+      const roadResult: SimulationAffectedRoad[] = [];
+      let totalAffectedKm = 0;
+
+      for (const rd of roadMeta) {
+        if (rd.lines.length === 0) {
+          roadResult.push({
+            id: rd.id,
+            name: rd.name,
+            depth_m: 0,
+            impassable: false,
+            status: 'unverified',
+            statusNote: 'No line geometry mapped',
+            length_m: rd.length_m,
+          });
+          continue;
+        }
+
+        let maxDepth = 0;
+        let hasIntersection = false;
+
+        if (polys.features.length > 0) {
+          for (const poly of polys.features) {
+            const ring = poly.geometry.coordinates[0];
+            if (!ring || ring.length < 3) continue;
+            if (rd.lines.some((line) => doesLineStringIntersectPolygonRing(line, ring))) {
+              hasIntersection = true;
+              if (poly.properties.depth_m > maxDepth) {
+                maxDepth = poly.properties.depth_m;
+              }
+            }
+          }
+        }
+
+        if (hasIntersection && maxDepth > 0) {
+          let finalDepth = maxDepth;
+          if (typeof rd.elevation_m === 'number') {
+            const calculatedDepth = waterSurfaceElevation - rd.elevation_m;
+            if (calculatedDepth > 0) {
+              finalDepth = Math.max(0.05, Math.min(maxDepth, Number(calculatedDepth.toFixed(2))));
+            } else {
+              finalDepth = 0; // elevated embankment
+            }
+          }
+
+          if (finalDepth > 0.25) {
+            roadResult.push({
+              id: rd.id,
+              name: rd.name,
+              depth_m: Number(finalDepth.toFixed(2)),
+              impassable: true,
+              status: 'flooded',
+              statusNote: `Severely flooded (${finalDepth.toFixed(2)}m depth > 0.25m safety limit; impassable for emergency vehicles)`,
+              elevation_m: rd.elevation_m,
+              length_m: rd.length_m,
+            });
+            totalAffectedKm += rd.length_m / 1000;
+          } else if (finalDepth > 0) {
+            roadResult.push({
+              id: rd.id,
+              name: rd.name,
+              depth_m: Number(finalDepth.toFixed(2)),
+              impassable: false,
+              status: 'affected',
+              statusNote: `Waterlogged (${finalDepth.toFixed(2)}m depth <= 0.25m; passable with caution at reduced speed)`,
+              elevation_m: rd.elevation_m,
+              length_m: rd.length_m,
+            });
+            totalAffectedKm += rd.length_m / 1000;
+          } else {
+            roadResult.push({
+              id: rd.id,
+              name: rd.name,
+              depth_m: 0,
+              impassable: false,
+              status: 'unaffected',
+              statusNote: 'Elevated embankment above simulated flood level; verified passable',
+              elevation_m: rd.elevation_m,
+              length_m: rd.length_m,
+            });
+          }
+        } else {
+          if (typeof rd.elevation_m === 'number' && hasBoundary) {
+            roadResult.push({
+              id: rd.id,
+              name: rd.name,
+              depth_m: 0,
+              impassable: false,
+              status: 'unaffected',
+              statusNote: 'Outside simulated pluvial depression; verified passable under scenario',
+              elevation_m: rd.elevation_m,
+              length_m: rd.length_m,
+            });
+          } else {
+            roadResult.push({
+              id: rd.id,
+              name: rd.name,
+              depth_m: 0,
+              impassable: false,
+              status: 'unverified',
+              statusNote: 'Elevation unverified in GIS — do not assume safe without local field check',
+              elevation_m: rd.elevation_m,
+              length_m: rd.length_m,
+            });
+          }
+        }
+      }
+
+      return { roadResult, totalAffectedKm: Number(totalAffectedKm.toFixed(2)) };
+    };
 
     // Soil infiltration rate adjustment based on soil type
     let effectiveInfil = config.infiltrationRate_mmh ?? (config as any).soilInfiltration_mmh ?? 6.0;
@@ -149,13 +388,10 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
     const baseElevation = typeof dataset.elevation_m === 'number' ? dataset.elevation_m : 25.0;
     const lowGroundElevation = baseElevation - 0.4;
 
-    const centerLng = dataset.center[0];
-    const centerLat = dataset.center[1];
-
     // Village catchment area from administrative boundary polygon (default ~2.14 sq km)
-    const villageAreaSqKm = dataset.boundary.features[0]?.properties.area_sqkm || 2.14;
+    const villageAreaSqKm = dataset.boundary?.features?.[0]?.properties?.area_sqkm || 2.14;
 
-    // Topographic slope factor: steep hill terrain (e.g. Sohra ~1430m) drains rapidly via gullies,
+    // Topographic slope factor: steep hill terrain (e.g. Sohra ~1430m, Joshimath ~1890m) drains rapidly via gullies,
     // producing concentrated torrent depths but less widespread standing surface ponding area than flat coastal plains.
     const terrainSlopeFactor = baseElevation > 800 ? 0.40 : baseElevation > 150 ? 0.70 : 1.0;
 
@@ -187,7 +423,7 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
       const scenarioMultiplier =
         config.scenario === 'baseline' ? 1.0 : config.scenario === 'existing_drainage' ? 0.68 : 0.22;
 
-      // Depth wave dynamic
+      // Depth wave dynamic: rises during active rainfall and recedes during drainage phase
       const activeHourEffect =
         h <= config.rainfallDuration_hours
           ? (h / config.rainfallDuration_hours) * 1.1
@@ -230,40 +466,18 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
         centerLat,
         frameMaxDepth,
         config.scenario,
-        dataset.elevation_m || 25
+        dataset.elevation_m || 25,
+        dataset
       );
 
-      // Calculate impacted buildings in this frame using precomputed plinths
-      const floodedBlds: string[] = [];
-      const criticalFlooded: string[] = [];
+      // Water surface level for this frame
+      const frameWaterLevel = lowGroundElevation + frameMaxDepth;
 
-      for (let bi = 0; bi < buildingPlinths.length; bi++) {
-        const bld = buildingPlinths[bi];
-        const pondingWaterLevel = lowGroundElevation + frameMaxDepth;
-        if (frameMaxDepth > 0 && pondingWaterLevel > bld.plinthTop) {
-          floodedBlds.push(bld.id);
-          if (bld.type !== 'residential') {
-            criticalFlooded.push(bld.name);
-          }
-        }
-      }
+      // Spatially intersect buildings with frame flood polygons
+      const bldEval = evaluateBuildingsExposure(floodPolygons, frameWaterLevel);
 
-      // Affected roads km: calculate spatial intersection against this frame's flood polygons
-      const affectedKm = Number(
-        dataset.roads.features
-          .filter((rd) => {
-            const rawCoords = rd.geometry?.coordinates;
-            if (!rawCoords || rawCoords.length === 0) return false;
-            const lines: Array<Array<[number, number]>> =
-              (rd.geometry as any)?.type === 'MultiLineString' ? (rawCoords as any) : [rawCoords as any];
-            return floodPolygons.features.some((poly) => {
-              const ring = poly.geometry.coordinates[0];
-              return lines.some((line) => doesLineStringIntersectPolygonRing(line, ring));
-            });
-          })
-          .reduce((acc, rd) => acc + (rd.properties.length_m / 1000), 0)
-          .toFixed(2)
-      );
+      // Spatially intersect roads with frame flood polygons (4-state classification)
+      const rdEval = evaluateRoadsExposure(floodPolygons, frameWaterLevel, !!dataset.boundary?.features?.[0]);
 
       frames.push({
         hour: h,
@@ -273,10 +487,12 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
         drainedVolume_m3: Math.round(drainedThisHour_m3),
         inundatedArea_ha: frameInundatedHa,
         maxDepth_m: frameMaxDepth,
-        floodedBuildingsCount: floodedBlds.length,
-        criticalFacilitiesFlooded: criticalFlooded,
-        affectedRoadsKm: affectedKm,
+        floodedBuildingsCount: bldEval.floodedIds.length,
+        criticalFacilitiesFlooded: bldEval.criticalFloodedNames,
+        affectedRoadsKm: rdEval.totalAffectedKm,
         floodPolygons,
+        affectedBuildings: bldEval.bldResult,
+        affectedRoads: rdEval.roadResult,
       });
     }
 
@@ -289,96 +505,23 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
       centerLat,
       maxOverallDepth,
       config.scenario,
-      dataset.elevation_m || 25
+      dataset.elevation_m || 25,
+      dataset
     );
 
-    const affectedBuildings = buildingPlinths.map((bld) => {
-      const depthAbovePlinth = maxOverallDepth > 0 ? Math.max(0, peakWaterLevel - bld.plinthTop) : 0;
-      let risk: 'safe' | 'low' | 'moderate' | 'severe' = 'safe';
+    // Peak exposure evaluations
+    const peakBldEval = evaluateBuildingsExposure(peakFloodPolygons, peakWaterLevel);
+    const peakRdEval = evaluateRoadsExposure(peakFloodPolygons, peakWaterLevel, !!dataset.boundary?.features?.[0]);
 
-      if (depthAbovePlinth > 0.45) risk = 'severe';
-      else if (depthAbovePlinth > 0.15) risk = 'moderate';
-      else if (depthAbovePlinth > 0) risk = 'low';
+    const affectedBuildings = peakBldEval.bldResult;
+    const affectedRoads = peakRdEval.roadResult;
 
-      return {
-        id: bld.id,
-        name: bld.name,
-        type: bld.type,
-        depth_m: Number(depthAbovePlinth.toFixed(2)),
-        risk,
-      };
-    });
-
-    const affectedRoads = dataset.roads.features.map((rd) => {
-      const rawCoords = rd.geometry?.coordinates;
-      if (!rawCoords || rawCoords.length === 0) {
-        return {
-          id: rd.properties.id,
-          name: rd.properties.name,
-          depth_m: 0,
-          impassable: false,
-        };
-      }
-
-      const lines: Array<Array<[number, number]>> =
-        (rd.geometry as any)?.type === 'MultiLineString'
-          ? (rawCoords as any)
-          : [rawCoords as any];
-
-      // Spatial intersection against peak flood polygons
-      let maxIntersectingPolyDepth = 0;
-      let hasIntersection = false;
-
-      for (const poly of peakFloodPolygons.features) {
-        const ring = poly.geometry.coordinates[0];
-        const intersects = lines.some((line) => doesLineStringIntersectPolygonRing(line, ring));
-        if (intersects) {
-          hasIntersection = true;
-          const polyDepth = poly.properties.depth_m || 0;
-          if (polyDepth > maxIntersectingPolyDepth) {
-            maxIntersectingPolyDepth = polyDepth;
-          }
-        }
-      }
-
-      if (!hasIntersection) {
-        return {
-          id: rd.properties.id,
-          name: rd.properties.name,
-          depth_m: 0,
-          impassable: false,
-        };
-      }
-
-      // If road has distinct surveyed elevation
-      let roadDepth = maxIntersectingPolyDepth;
-      if (typeof rd.properties.elevation_m === 'number') {
-        const calculatedDepth = peakWaterLevel - rd.properties.elevation_m;
-        if (calculatedDepth > 0) {
-          roadDepth = Math.max(0.05, Math.min(maxIntersectingPolyDepth, Number(calculatedDepth.toFixed(2))));
-        } else if (calculatedDepth <= 0 && rd.properties.elevation_m > peakWaterLevel) {
-          // Elevated embankment above water surface
-          roadDepth = 0;
-        }
-      }
-
-      return {
-        id: rd.properties.id,
-        name: rd.properties.name,
-        depth_m: Number(roadDepth.toFixed(2)),
-        impassable: roadDepth > 0.25, // Vehicles and emergency access stalled at 25cm (IRC / NDMA)
-      };
-    });
-
-    const hasBuildings = dataset.buildings.features.length > 0;
-    const floodedCount = affectedBuildings.filter((b) => b.depth_m > 0).length;
+    const hasBuildings = (dataset.buildings?.features || []).length > 0;
+    const floodedCount = peakBldEval.floodedIds.length;
     const vulnerablePop = hasBuildings
-      ? dataset.buildings.features
-          .filter((b) => {
-            const match = affectedBuildings.find((ab) => ab.id === b.properties.id);
-            return match && match.depth_m > 0;
-          })
-          .reduce((acc, b) => acc + b.properties.occupants, 0)
+      ? (dataset.buildings?.features || [])
+          .filter((b) => peakBldEval.floodedIds.includes(b.properties?.id))
+          .reduce((acc, b) => acc + (b.properties?.occupants || 0), 0)
       : 0;
 
     const farmlandHa = Number(
@@ -400,7 +543,7 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
     const impactedSquareKilometres = Number((impactedHectares / 100).toFixed(4));
     const meanDepth = Number((maxOverallDepth * 0.58).toFixed(2));
     const impassableRoadLengthKm = Number(
-      (affectedRoads.filter((r) => r.impassable).length * 0.45).toFixed(2)
+      (affectedRoads.filter((r) => r.impassable).reduce((acc, r) => acc + (r.length_m || 100) / 1000, 0)).toFixed(2)
     );
 
     const canonicalResult = {
@@ -452,9 +595,12 @@ export class IllustrativeHydrologicalEngine implements HydrologicalSimulationEng
       modelLabel: 'Illustrative Rational-Depression Solver (Unvalidated Demo)',
       isIllustrative: true,
       modelScopeNote: hasBuildings
-        ? 'Illustrative hydraulic model evaluated against mapped building plinths.'
-        : 'Building footprints are unmapped in OpenStreetMap for this village. Dwelling inundation counts cannot be evaluated without mapped footprints.',
+        ? 'Illustrative hydraulic model evaluated against DEM hypsometry and mapped building plinths.'
+        : 'Building footprint exposure unavailable: building footprints are unmapped in OpenStreetMap for this village. Dwelling inundation counts cannot be evaluated without mapped footprints.',
       buildingDataStatus: hasBuildings ? 'available_mapped' : 'unavailable_unmapped',
+      buildingExposureStatus: hasBuildings ? 'available_mapped' : 'unavailable_unmapped',
+      hydrodynamicStatus: 'simplified_rational_hypsometric',
+      modelDescription: 'Simplified 2D Rational-Depression Solver (Screening Model - Heuristic Physical Estimate)',
     };
 
     if (simulationCache.size >= SIM_CACHE_MAX_ENTRIES) {
@@ -561,8 +707,9 @@ export function generateIllustrativeFloodPolygons(
   centerLat: number,
   depth_m: number,
   scenario: ScenarioType,
-  elevation_m: number = 25
-): FeatureCollection<Polygon, { depth_m: number; category: string }> {
+  elevation_m: number = 25,
+  dataset?: VillageDataset
+): FeatureCollection<Polygon, { depth_m: number; category: string; source?: string; label?: string; modelScope?: string }> {
   // Mountain and high-elevation escarpments (elevation > 400m) do not accumulate stagnant pluvial flood lakes;
   // stormwater drains rapidly through natural ravines. Only low-gradient basins form pluvial ponding polygons.
   if (depth_m <= 0.03 || elevation_m > 400) {
@@ -571,7 +718,7 @@ export function generateIllustrativeFloodPolygons(
 
   // Scale bounds according to depth
   const spread = Math.min(0.009, depth_m * 0.0065);
-  const features: FeatureCollection<Polygon, { depth_m: number; category: string }>['features'] = [];
+  const features: FeatureCollection<Polygon, { depth_m: number; category: string; source?: string; label?: string; modelScope?: string }>['features'] = [];
 
   // Zone 1: Deepest depression (Local low elevation basin)
   if (depth_m > 0.05) {
@@ -582,6 +729,9 @@ export function generateIllustrativeFloodPolygons(
       properties: {
         depth_m: Number(d1.toFixed(2)),
         category: cat1,
+        source: 'simulated_illustrative',
+        label: 'Simulated Pluvial Ponding (Illustrative Model)',
+        modelScope: 'Simplified 2D Rational-Depression Solver (Screening Estimate - Not Ground Truth)',
       },
       geometry: {
         type: 'Polygon',
@@ -607,6 +757,9 @@ export function generateIllustrativeFloodPolygons(
       properties: {
         depth_m: Number(d2.toFixed(2)),
         category: d2 > 0.5 ? 'severe' : 'moderate',
+        source: 'simulated_illustrative',
+        label: 'Simulated Pluvial Ponding (Illustrative Model)',
+        modelScope: 'Simplified 2D Rational-Depression Solver (Screening Estimate - Not Ground Truth)',
       },
       geometry: {
         type: 'Polygon',
@@ -630,6 +783,9 @@ export function generateIllustrativeFloodPolygons(
       properties: {
         depth_m: Number((depth_m * 0.45).toFixed(2)),
         category: 'low',
+        source: 'simulated_illustrative',
+        label: 'Simulated Pluvial Ponding (Illustrative Model)',
+        modelScope: 'Simplified 2D Rational-Depression Solver (Screening Estimate - Not Ground Truth)',
       },
       geometry: {
         type: 'Polygon',

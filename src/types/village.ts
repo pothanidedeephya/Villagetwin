@@ -115,6 +115,30 @@ export interface SimulationConfig {
   baselineWaterDepth_m?: number;
 }
 
+export type RoadInundationStatus = 'flooded' | 'affected' | 'unaffected' | 'unverified';
+
+export interface SimulationAffectedBuilding {
+  id: string;
+  name: string;
+  type: CriticalFacilityType;
+  depth_m: number;
+  risk: 'safe' | 'low' | 'moderate' | 'severe';
+  groundElevation_m?: number;
+  plinthElevation_m?: number;
+  statusNote?: string;
+}
+
+export interface SimulationAffectedRoad {
+  id: string;
+  name: string;
+  depth_m: number;
+  impassable: boolean;
+  status?: RoadInundationStatus;
+  statusNote?: string;
+  elevation_m?: number;
+  length_m?: number;
+}
+
 export interface SimulationFrame {
   hour: number;
   rainfallThisHour_mm: number;
@@ -126,7 +150,9 @@ export interface SimulationFrame {
   floodedBuildingsCount: number;
   criticalFacilitiesFlooded: string[];
   affectedRoadsKm: number;
-  floodPolygons: FeatureCollection<Polygon, { depth_m: number; category: string }>;
+  floodPolygons: FeatureCollection<Polygon, { depth_m: number; category: string; source?: string; label?: string }>;
+  affectedBuildings?: SimulationAffectedBuilding[];
+  affectedRoads?: SimulationAffectedRoad[];
 }
 
 export interface CanonicalDepthStatistics {
@@ -166,21 +192,10 @@ export interface SimulationResult {
   totalRainfall_mm: number;
   maxInundatedArea_ha: number;
   peakDepth_m: number;
-  peakFloodPolygons?: FeatureCollection<Polygon, { depth_m: number; category: string }>;
+  peakFloodPolygons?: FeatureCollection<Polygon, { depth_m: number; category: string; source?: string; label?: string }>;
   canonicalResult?: CanonicalSimulationResult;
-  affectedBuildings: Array<{
-    id: string;
-    name: string;
-    type: CriticalFacilityType;
-    depth_m: number;
-    risk: 'safe' | 'low' | 'moderate' | 'severe';
-  }>;
-  affectedRoads: Array<{
-    id: string;
-    name: string;
-    depth_m: number;
-    impassable: boolean;
-  }>;
+  affectedBuildings: SimulationAffectedBuilding[];
+  affectedRoads: SimulationAffectedRoad[];
   farmlandInundated_ha: number;
   vulnerablePopulationAffected: number;
   estimatedLoss_lakhs: number;
@@ -191,6 +206,9 @@ export interface SimulationResult {
   modelScopeNote?: string;
   rainfallSource?: 'live_weather_observation' | 'scenario_design_storm';
   buildingDataStatus?: 'available_mapped' | 'unavailable_unmapped';
+  buildingExposureStatus?: 'available_mapped' | 'unavailable_unmapped';
+  hydrodynamicStatus?: 'simplified_rational_hypsometric' | 'hydrodynamic_2d';
+  modelDescription?: string;
 }
 
 export type FeatureCollectionWithMeta<G extends Geometry = Geometry, P = any> = FeatureCollection<G, P> & {
