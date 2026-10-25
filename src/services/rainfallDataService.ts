@@ -268,6 +268,36 @@ export function getWmoConditionDescription(code: number, rate_mmh?: number): str
 export type OpenMeteoApiResponse = Record<string, any>;
 
 /**
+ * Resolves precipitation unit multiplier to normalize incoming API data to millimeters (mm).
+ * Supports standard Open-Meteo unit 'mm' as well as imperial unit 'inch' / 'in' (1 inch = 25.4 mm).
+ */
+export function getPrecipitationMultiplier(unit?: string): number {
+  if (!unit || typeof unit !== 'string') return 1.0;
+  const clean = unit.trim().toLowerCase();
+  if (clean === 'inch' || clean === 'in' || clean === 'inches') {
+    return 25.4;
+  }
+  return 1.0;
+}
+
+/**
+ * Safely formats precipitation numbers preventing small positive values from rounding down to 0.
+ * Preserves genuine 0 as 0.0.
+ */
+export function formatPrecipitationNumber(val: number | null | undefined): number {
+  if (val === null || val === undefined || isNaN(val) || val <= 0) {
+    return 0.0;
+  }
+  if (val >= 0.1) {
+    return Number(val.toFixed(1));
+  }
+  if (val >= 0.01) {
+    return Number(val.toFixed(2));
+  }
+  return Number(val.toFixed(3));
+}
+
+/**
  * Parses and validates raw Open-Meteo response into the structured WeatherData schema,
  * separating current model estimate, most recent completed hourly value, and near-term forecasts.
  */
@@ -286,6 +316,11 @@ export function parseOpenMeteoResponse(
   const hourly = data.hourly || {};
   const daily = data.daily || {};
 
+  const curUnits = data.current_units || {};
+  const hourlyUnits = data.hourly_units || {};
+  const currentPrecipMultiplier = getPrecipitationMultiplier(curUnits.precipitation || curUnits.rain);
+  const hourlyPrecipMultiplier = getPrecipitationMultiplier(hourlyUnits.precipitation || hourlyUnits.rain);
+
   // --------------------------------------------------------------------------
   // 1. Current Model Estimate (Section 2.A)
   // --------------------------------------------------------------------------
@@ -302,13 +337,15 @@ export function parseOpenMeteoResponse(
   let precipLabel = 'Rainfall data unavailable';
 
   if (hasAnyPrecipData) {
-    currentPrecipRate = Number((cur.precipitation ?? cur.rain ?? 0.0).toFixed(1));
-    currentRainRate = Number((cur.rain ?? 0.0).toFixed(1));
-    currentShowersRate = Number((cur.showers ?? 0.0).toFixed(1));
+    const rawPrecip = (cur.precipitation ?? cur.rain ?? 0.0) * currentPrecipMultiplier;
+    currentPrecipRate = formatPrecipitationNumber(rawPrecip);
+    currentRainRate = formatPrecipitationNumber((cur.rain ?? 0.0) * currentPrecipMultiplier);
+    currentShowersRate = formatPrecipitationNumber((cur.showers ?? 0.0) * currentPrecipMultiplier);
 
     if (currentPrecipRate > 0) {
       precipStatus = 'measured';
-      precipLabel = `${currentPrecipRate.toFixed(1)} mm/h (Open-Meteo Numerical Model Estimate)`;
+      const displayRate = currentPrecipRate < 0.1 ? currentPrecipRate.toFixed(2) : currentPrecipRate.toFixed(1);
+      precipLabel = `${displayRate} mm/h (Open-Meteo Numerical Model Estimate)`;
     } else {
       precipStatus = 'zero_dry';
       precipLabel = '0.0 mm/h (Dry Conditions / Genuine Dry Weather)';
@@ -352,12 +389,21 @@ export function parseOpenMeteoResponse(
     const endH = endTimeStr.split('T')[1]?.substring(0, 5) || endTimeStr;
     const intervalLabel = `${startH} - ${endH} IST`;
 
-    const hourlyPrecipAccum_mm = Number((hourly.precipitation?.[completedIdx] ?? 0.0).toFixed(1));
-    const hourlyRainAccum_mm = Number((hourly.rain?.[completedIdx] ?? 0.0).toFixed(1));
-    const hourlyShowersAccum_mm = Number((hourly.showers?.[completedIdx] ?? 0.0).toFixed(1));
+    const rawHourlyPrecip = (hourly.precipitation?.[completedIdx] ?? 0.0) * hourlyPrecipMultiplier;
+    const hourlyPrecipAccum_mm = formatPrecipitationNumber(rawHourlyPrecip);
+    const hourlyRainAccum_mm = formatPrecipitationNumber((hourly.rain?.[completedIdx] ?? 0.0) * hourlyPrecipMultiplier);
+    const hourlyShowersAccum_mm = formatPrecipitationNumber((hourly.showers?.[completedIdx] ?? 0.0) * hourlyPrecipMultiplier);
 
     // Rate in mm/h over a 1.0 hour interval
     const hourlyRate_mmh = hourlyPrecipAccum_mm;
+
+    const formattedPrecipStr = hourlyPrecipAccum_mm < 0.1 && hourlyPrecipAccum_mm > 0
+      ? hourlyPrecipAccum_mm.toFixed(2)
+      : hourlyPrecipAccum_mm.toFixed(1);
+
+    const formattedRateStr = hourlyRate_mmh < 0.1 && hourlyRate_mmh > 0
+      ? hourlyRate_mmh.toFixed(2)
+      : hourlyRate_mmh.toFixed(1);
 
     mostRecentCompletedHour = {
       intervalLabel,
@@ -367,10 +413,9 @@ export function parseOpenMeteoResponse(
       averageRate_mmh: hourlyRate_mmh,
       rain_mm: hourlyRainAccum_mm,
       showers_mm: hourlyShowersAccum_mm,
-      calculationNote: `Accumulated precipitation over the 60-minute interval from ${intervalLabel} is ${hourlyPrecipAccum_mm.toFixed(
-        1
-      )} mm, corresponding to an average rate of ${hourlyRate_mmh.toFixed(1)} mm/h.`,
+      calculationNote: `Accumulated precipitation over the 60-minute interval from ${intervalLabel} is ${formattedPrecipStr} mm, corresponding to an average rate of ${formattedRateStr} mm/h.`,
       status: hourlyPrecipAccum_mm > 0 ? 'measured' : 'zero_dry',
+      readingType: 'historical_reading',
     };
   } else {
     mostRecentCompletedHour = {
@@ -383,6 +428,7 @@ export function parseOpenMeteoResponse(
       showers_mm: 0,
       calculationNote: 'Hourly precipitation array did not contain a completed interval.',
       status: 'unavailable',
+      readingType: 'historical_reading',
     };
   }
 
@@ -407,10 +453,10 @@ export function parseOpenMeteoResponse(
       for (let i = startH; i < endH; i++) {
         const val = precipArray[i];
         if (typeof val === 'number' && !isNaN(val)) {
-          sum += val;
+          sum += val * hourlyPrecipMultiplier;
         }
       }
-      return Number(sum.toFixed(1));
+      return formatPrecipitationNumber(sum);
     };
 
     last1h_mm = sumNonOverlappingHours(1);
@@ -431,8 +477,9 @@ export function parseOpenMeteoResponse(
     last6h_mm,
     last24h_mm,
     status: pastStatus,
+    readingType: 'historical_reading',
     sourceNotice: 'Open-Meteo High-Resolution NWP (Sum of completed 1-hour non-overlapping model intervals in Asia/Kolkata)',
-    calculationBreakdown: `Last 1h: ${last1h_mm.toFixed(1)} mm | Last 3h: ${last3h_mm.toFixed(1)} mm | Last 6h: ${last6h_mm.toFixed(1)} mm | Last 24h: ${last24h_mm.toFixed(1)} mm`,
+    calculationBreakdown: `Last 1h: ${last1h_mm < 0.1 && last1h_mm > 0 ? last1h_mm.toFixed(2) : last1h_mm.toFixed(1)} mm | Last 3h: ${last3h_mm < 0.1 && last3h_mm > 0 ? last3h_mm.toFixed(2) : last3h_mm.toFixed(1)} mm | Last 6h: ${last6h_mm < 0.1 && last6h_mm > 0 ? last6h_mm.toFixed(2) : last6h_mm.toFixed(1)} mm | Last 24h: ${last24h_mm < 0.1 && last24h_mm > 0 ? last24h_mm.toFixed(2) : last24h_mm.toFixed(1)} mm`,
   };
 
   const intensityBand = getRainfallIntensityBand(
@@ -459,7 +506,10 @@ export function parseOpenMeteoResponse(
       for (let offset = 0; offset < hours; offset++) {
         const idx = baseForecastIdx + offset;
         if (idx < hourlyTimes.length) {
-          sumPrecip += hourly.precipitation?.[idx] ?? 0;
+          const rawVal = hourly.precipitation?.[idx];
+          if (typeof rawVal === 'number' && !isNaN(rawVal)) {
+            sumPrecip += rawVal * hourlyPrecipMultiplier;
+          }
           const p = hourly.precipitation_probability?.[idx] ?? 0;
           if (p > maxProb) maxProb = p;
           endT = hourlyTimes[idx]?.split('T')[1]?.substring(0, 5) || '';
@@ -472,7 +522,7 @@ export function parseOpenMeteoResponse(
     const duration = Math.max(1, validHours);
     const rawRate = sumPrecip / duration;
 
-    // Issue 2 Precision Formatting:
+    // Small positive precision protection:
     // 1. If sumPrecip is 0, avgRate is strictly 0.0 mm/h.
     // 2. If sumPrecip is positive (e.g. 0.1mm over 3h), avgRate is calculated as 0.03 mm/h.
     //    It must NEVER round down to 0.0 mm/h.
@@ -483,19 +533,22 @@ export function parseOpenMeteoResponse(
     if (sumPrecip > 0 && duration > 0) {
       avgRate = Number(rawRate.toFixed(2));
       if (avgRate === 0) {
-        avgRate = 0.01; // Guard against extreme micro-values rounding to 0
+        avgRate = Number(rawRate.toFixed(3)) || 0.01; // Guard against extreme micro-values rounding to 0
       }
       rateDisplayLabel = avgRate < 0.1 ? `${avgRate.toFixed(2)} mm/h` : `${avgRate.toFixed(2)} mm/h`;
     }
 
+    const formattedAccum = formatPrecipitationNumber(sumPrecip);
+
     return {
       period: `Next ${hours}h`,
       hours,
-      rainfall_mm: Number(sumPrecip.toFixed(1)),
+      rainfall_mm: formattedAccum,
       rate_mmh: avgRate,
       rateDisplayLabel,
       probability_percent: maxProb > 0 ? maxProb : undefined,
       timeRangeLabel: rangeLabel,
+      readingType: 'forecast',
     };
   };
 
@@ -570,6 +623,7 @@ export function parseOpenMeteoResponse(
       timestampIst: cur.time ? `${cur.time.replace('T', ' ')} IST` : new Date().toLocaleTimeString('en-IN') + ' IST',
       status: precipStatus,
       label: precipLabel,
+      readingType: 'model_estimate',
     },
     mostRecentCompletedHour,
     pastAccumulations: pastRainfall,
@@ -632,6 +686,7 @@ export function parseOpenMeteoResponse(
       observationTimeIso: curTimeIso,
       dataAgeMinutes,
       intensityBand,
+      readingType: 'model_estimate',
     },
     pastRainfall,
     hourlyForecast,

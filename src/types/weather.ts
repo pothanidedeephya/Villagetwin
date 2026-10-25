@@ -32,6 +32,7 @@ export interface CurrentWeather {
   rain_mmh?: number;
   showers_mmh?: number;
   intensityBand?: RainfallIntensityBand;
+  readingType?: 'live_gauge' | 'model_estimate' | 'historical_reading' | 'forecast';
 }
 
 export type SimulationRainfallMode =
@@ -68,6 +69,7 @@ export interface NearTermRainfallForecast {
   rateDisplayLabel?: string; // Formatted rate preserving precision (e.g. '0.03 mm/h' or '<0.1 mm/h')
   probability_percent?: number;
   timeRangeLabel?: string;
+  readingType?: 'forecast';
 }
 
 export interface CompletedHourlyRainfall {
@@ -80,6 +82,7 @@ export interface CompletedHourlyRainfall {
   showers_mm: number;
   calculationNote: string;
   status: PrecipitationStatus;
+  readingType?: 'historical_reading';
 }
 
 export interface PastRainfallAccumulation {
@@ -90,6 +93,7 @@ export interface PastRainfallAccumulation {
   status: PrecipitationStatus;
   sourceNotice: string;
   calculationBreakdown?: string;
+  readingType?: 'historical_reading';
 }
 
 export type RainfallIntensityCategory = 'dry' | 'light' | 'moderate' | 'heavy' | 'very_heavy';
@@ -114,6 +118,7 @@ export interface RainfallDiagnosticDetails {
     timestampIst: string;
     status: PrecipitationStatus;
     label: string;
+    readingType?: 'live_gauge' | 'model_estimate' | 'historical_reading' | 'forecast';
   };
   mostRecentCompletedHour: CompletedHourlyRainfall;
   pastAccumulations?: PastRainfallAccumulation;
