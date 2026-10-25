@@ -1,0 +1,6 @@
+{
+  "name": "Village Flood Digital Twin",
+  "description": "Village-scale flood-risk mapping, drainage planning, and scenario simulation for rural communities in Andhra Pradesh, India.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

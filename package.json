@@ -1,0 +1,51 @@
+{
+  "name": "react-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "start": "tsx server.ts",
+    "build": "vite build",
+    "preview": "vite preview",
+    "clean": "rm -rf dist server.js",
+    "lint": "tsc --noEmit",
+    "test": "tsx tests/hazardValidation.test.ts && tsx tests/locationDataSwitching.test.ts && tsx tests/floodHydrologyAndInfrastructure.test.ts && tsx tests/hourlyRefreshAndValidation.test.ts && tsx tests/hazardImpactBoundary.test.ts && tsx tests/systemValidationAndRobustness.test.ts && tsx tests/navigationAndRouting.test.ts && tsx tests/hazardClassificationAndEvidence.test.ts && tsx tests/locationSpecificSimulation.test.ts && tsx tests/governmentDataIntegration.test.ts && tsx tests/imdCycloneWindIntegration.test.ts && tsx tests/liveGovernmentDataPipeline.test.ts && tsx tests/masterDataIntegrityAudit.test.ts && tsx tests/locationSearchAndDropdown.test.ts && tsx tests/disasterRiskReportAudit.test.ts && tsx tests/nationwideHierarchyAndSearch.test.ts && tsx tests/openWeatherIntegration.test.ts && tsx tests/roadNetworkAndCycloneAudit.test.ts && tsx tests/nationwideGisAndDataIntegrity.test.ts && tsx tests/officialGovernmentDataIntegration.test.ts && tsx tests/liveRainfallIntensity.test.ts && tsx tests/simpleUserFriendlyDashboard.test.ts && tsx tests/locationSearchAndAutoNavigation.test.ts && tsx tests/simpleEnglishWarningSystem.test.ts && tsx tests/riverGaugeMapLabelUi.test.ts && tsx tests/mapLayoutAndFloodSimulation.test.ts && tsx tests/cwcGottaBarrageRainfallVerification.test.ts && tsx tests/performanceOptimization.test.ts && tsx tests/cycloneTrackingAndDemo.test.ts && tsx tests/timeBasedFloodAndCycloneSimulation.test.ts && tsx tests/selectedLocationMapRedirection.test.ts && tsx tests/cycloneCauseAndMapSimulation.test.ts && tsx tests/unrequestedRouteAndMapOverlays.test.ts && tsx tests/aiPlannerAccuracyAudit.test.ts && tsx tests/planSafeInstructions.test.ts && tsx tests/performanceDiagnostics.test.ts",
+    "test:ui": "tsx tests/mapPopupUiVerification.test.ts",
+    "test:duplicate-check": "tsx tests/noDuplicateHazardPopups.test.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.4.0",
+    "@supabase/supabase-js": "^2.118.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/leaflet": "^1.9.22",
+    "@vis.gl/react-google-maps": "^1.10.1",
+    "@vitejs/plugin-react": "^6.1.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^0.546.0",
+    "maplibre-gl": "^6.14.0",
+    "motion": "^12.23.24",
+    "pg": "^8.23.1",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1",
+    "recharts": "^3.10.1",
+    "vite": "^8.3.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/geojson": "^7946.0.16",
+    "@types/google.maps": "^3.66.7",
+    "@types/node": "^22.14.0",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "autoprefixer": "^10.4.21",
+    "esbuild": "^0.28.2",
+    "puppeteer-core": "^25.15.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^7.0.2"
+  }
+}

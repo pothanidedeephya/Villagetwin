@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Village Flood Digital Twin</title>
+    <meta name="description" content="Village-scale flood-risk mapping, drainage planning, and scenario simulation for rural communities in Andhra Pradesh, India." />
+    <meta property="og:title" content="Village Flood Digital Twin" />
+    <meta property="og:description" content="Village-scale flood-risk mapping, drainage planning, and scenario simulation for rural communities in Andhra Pradesh, India." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script>
+      // In AI Studio preview iframe, HMR is disabled. Suppress Vite HMR WebSocket errors.
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event.reason;
+        var msg = (reason && (reason.message || String(reason))) || '';
+        var stack = (reason && reason.stack) || '';
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          msg.indexOf('vite') !== -1 ||
+          stack.indexOf('@vite/client') !== -1 ||
+          stack.indexOf('client.mjs') !== -1
+        ) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        var msg = event.message || '';
+        var filename = event.filename || '';
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          filename.indexOf('@vite/client') !== -1 ||
+          filename.indexOf('client.mjs') !== -1
+        ) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
