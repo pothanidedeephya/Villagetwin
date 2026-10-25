@@ -99,7 +99,8 @@ export interface VillageMapProps {
   cwcGauges?: CwcRiverGaugeStation[];
   terrainHydrology?: TerrainHydrologyData;
   activeEvacuationRoute?: FloodAwareEvacuationRoute | null;
-  affectedRoads?: Array<{ id: string; name: string; depth_m: number; impassable: boolean }>;
+  affectedRoads?: Array<{ id: string; name: string; depth_m: number; impassable: boolean; status?: 'flooded' | 'affected' | 'unaffected' | 'unverified'; statusNote?: string }>;
+  affectedBuildings?: Array<{ id: string; name: string; type: string; depth_m: number; risk: 'safe' | 'low' | 'moderate' | 'severe'; statusNote?: string }>;
   onSelectCwcGauge?: (gauge: CwcRiverGaugeStation) => void;
   // Drawing mode for Drainage Planner
   isDrawingMode?: boolean;
@@ -181,6 +182,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
   terrainHydrology,
   activeEvacuationRoute = null,
   affectedRoads = [],
+  affectedBuildings = [],
   onSelectCwcGauge,
   isDrawingMode = false,
   drawingType = 'drain',
@@ -1716,19 +1718,25 @@ export const VillageMap: React.FC<VillageMapProps> = ({
             rd.properties?.roadType?.includes('Agricultural');
 
           // 1. Evaluate road hazard status from simulation results and active hazard overlays
-          let roadStatus: 'passable' | 'caution' | 'severed' = 'passable';
+          // Distinguish 4 states: 'flooded' (>0.25m), 'affected' (0-0.25m), 'unaffected' (verified clear), and 'unverified'
+          let roadStatus: 'flooded' | 'affected' | 'unaffected' | 'unverified' = 'unverified';
           let hazardDepth_m: number | undefined = undefined;
+          let statusNote: string | undefined = undefined;
 
           // Check canonical simulation affected roads
           const simMatch = affectedRoads.find((ar) => ar.id === rd.properties?.id);
           if (simMatch) {
-            if (simMatch.impassable) {
-              roadStatus = 'severed';
-              hazardDepth_m = simMatch.depth_m;
-            } else if (simMatch.depth_m > 0) {
-              roadStatus = 'caution';
-              hazardDepth_m = simMatch.depth_m;
-            }
+            roadStatus = simMatch.status || (simMatch.impassable ? 'flooded' : simMatch.depth_m > 0 ? 'affected' : 'unaffected');
+            hazardDepth_m = simMatch.depth_m;
+            statusNote = simMatch.statusNote;
+          } else if (affectedRoads && affectedRoads.length > 0) {
+            // A simulation has run, but this road was not in the evaluated/surveyed set
+            roadStatus = 'unverified';
+            statusNote = 'Road segment outside verified simulation elevation grid; status unverified.';
+          } else {
+            // No simulation active; elevation unverified (never label safe merely because flood data is absent)
+            roadStatus = 'unverified';
+            statusNote = 'Do not assume safe merely because flood data is absent.';
           }
 
           // Check spatial intersection with active multi-hazard overlays if present
@@ -1745,28 +1753,30 @@ export const VillageMap: React.FC<VillageMapProps> = ({
                     (props.windSpeed_kmh || 0) >= 130 ||
                     (props.depth_m || 0) > 0.25
                   ) {
-                    roadStatus = 'severed';
-                    hazardDepth_m = props.depth_m || props.surge_m;
-                  } else if (roadStatus !== 'severed') {
-                    roadStatus = 'caution';
-                    hazardDepth_m = props.depth_m || props.surge_m;
+                    roadStatus = 'flooded';
+                    hazardDepth_m = props.depth_m || props.surge_m || 0.35;
+                    statusNote = 'Overtopped by simulated multi-hazard surge/inundation (>0.25m).';
+                  } else if (roadStatus !== 'flooded') {
+                    roadStatus = 'affected';
+                    hazardDepth_m = props.depth_m || props.surge_m || 0.15;
+                    statusNote = 'Partially waterlogged by simulated multi-hazard overlay (0-0.25m).';
                   }
                 }
               }
             }
           }
 
-          // 2. Cartographic styling based on physical hierarchy & status
+          // 2. Cartographic styling based on physical hierarchy & 4-state inundation status
           let color = '#64748b'; // default slate for passable rural roads
           let weight = 2.2;
           let dashArray: string | undefined = undefined;
 
-          if (roadStatus === 'severed') {
-            color = '#dc2626'; // Red alert for severed roads
+          if (roadStatus === 'flooded') {
+            color = '#dc2626'; // Red alert for flooded/impassable roads
             weight = isNational ? 4.0 : isState ? 3.5 : 3.0;
             dashArray = '8, 6';
-          } else if (roadStatus === 'caution') {
-            color = '#f59e0b'; // Amber warning for waterlogged roads
+          } else if (roadStatus === 'affected') {
+            color = '#f59e0b'; // Amber warning for waterlogged roads (0-0.25m)
             weight = isNational ? 3.6 : isState ? 3.2 : 2.8;
             dashArray = '6, 4';
           } else {
@@ -1794,7 +1804,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
           }
 
           // Subtle casing for contrast on imagery
-          if (roadStatus === 'severed') {
+          if (roadStatus === 'flooded') {
             const casing = L.polyline(latLngs, {
               color: '#450a0a',
               weight: weight + 1.8,
@@ -1818,7 +1828,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
             color,
             weight,
             dashArray,
-            opacity: 0.95,
+            opacity: roadStatus === 'unverified' ? 0.85 : 0.95,
             pane: 'roadsPane',
           });
 
@@ -1829,18 +1839,22 @@ export const VillageMap: React.FC<VillageMapProps> = ({
             : `<span style="display:inline-block; background:#f1f5f9; color:#475569; padding:1px 5px; border-radius:3px; font-weight:600; font-size:9px;">BASE ROAD NETWORK</span>`;
 
           const statusBadge =
-            roadStatus === 'severed'
-              ? `<div style="display:inline-flex; align-items:center; gap:4px; background:#fee2e2; color:#991b1b; padding:2px 6px; border-radius:4px; font-weight:700; font-size:10px; margin-bottom:3px;">⛔ IMPASSABLE / SEVERED</div>`
-              : roadStatus === 'caution'
-              ? `<div style="display:inline-flex; align-items:center; gap:4px; background:#fef3c7; color:#92400e; padding:2px 6px; border-radius:4px; font-weight:700; font-size:10px; margin-bottom:3px;">⚠️ CAUTION — PARTIALLY WATERLOGGED</div>`
-              : `<div style="display:inline-flex; align-items:center; gap:4px; background:#dcfce7; color:#166534; padding:2px 6px; border-radius:4px; font-weight:700; font-size:10px; margin-bottom:3px;">✓ PASSABLE</div>`;
+            roadStatus === 'flooded'
+              ? `<div style="display:inline-flex; align-items:center; gap:4px; background:#fee2e2; color:#991b1b; padding:2px 6px; border-radius:4px; font-weight:700; font-size:10px; margin-bottom:3px;">⛔ FLOODED / IMPASSABLE (>0.25m)</div>`
+              : roadStatus === 'affected'
+              ? `<div style="display:inline-flex; align-items:center; gap:4px; background:#fef3c7; color:#92400e; padding:2px 6px; border-radius:4px; font-weight:700; font-size:10px; margin-bottom:3px;">⚠️ AFFECTED — WATERLOGGED (0–0.25m)</div>`
+              : roadStatus === 'unaffected'
+              ? `<div style="display:inline-flex; align-items:center; gap:4px; background:#dcfce7; color:#166534; padding:2px 6px; border-radius:4px; font-weight:700; font-size:10px; margin-bottom:3px;">✓ VERIFIED UNAFFECTED (DRY)</div>`
+              : `<div style="display:inline-flex; align-items:center; gap:4px; background:#f1f5f9; color:#475569; padding:2px 6px; border-radius:4px; font-weight:600; font-size:10px; margin-bottom:3px;">❓ UNVERIFIED ROAD ELEVATION</div>`;
 
           const detailNote =
-            roadStatus === 'severed'
-              ? `<span style="color:#b91c1c; font-size:10px; font-weight:600; display:block;">Water Depth: ${typeof hazardDepth_m === 'number' ? hazardDepth_m + 'm' : '>0.25m'} · Route Blocked</span>`
-              : roadStatus === 'caution'
-              ? `<span style="color:#b45309; font-size:10px; font-weight:600; display:block;">Water Depth: ${typeof hazardDepth_m === 'number' ? hazardDepth_m + 'm' : '≤0.25m'} · High-Clearance Vehicles Only</span>`
-              : `<span style="color:#15803d; font-size:10px; font-weight:600; display:block;">Passable Road · Dry / Unaffected</span>`;
+            roadStatus === 'flooded'
+              ? `<span style="color:#b91c1c; font-size:10px; font-weight:600; display:block;">Water Depth: ${typeof hazardDepth_m === 'number' ? hazardDepth_m.toFixed(2) + 'm' : '>0.25m'} · Route Impassable</span>`
+              : roadStatus === 'affected'
+              ? `<span style="color:#b45309; font-size:10px; font-weight:600; display:block;">Water Depth: ${typeof hazardDepth_m === 'number' ? hazardDepth_m.toFixed(2) + 'm' : '≤0.25m'} · High-Clearance Vehicles Only</span>`
+              : roadStatus === 'unaffected'
+              ? `<span style="color:#15803d; font-size:10px; font-weight:600; display:block;">Passable Road · Elevation exceeds simulated inundation</span>`
+              : `<span style="color:#64748b; font-size:10px; font-weight:500; display:block;">Do not assume safe merely because flood data is absent.</span>`;
 
           line.bindTooltip(
             `<div style="font-family: system-ui, sans-serif; font-size: 11px; line-height: 1.35; padding: 3px;">
@@ -1858,7 +1872,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
           });
 
           line.on('mouseout', () => {
-            line.setStyle({ weight, opacity: 0.95 });
+            line.setStyle({ weight, opacity: roadStatus === 'unverified' ? 0.85 : 0.95 });
           });
 
           line.on('click', (e) => {
@@ -1869,6 +1883,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
                 ...rd.properties,
                 status: roadStatus,
                 hazardDepth_m,
+                statusNote,
               },
               geometry: rd.geometry,
               coordinates: [e.latlng.lng, e.latlng.lat],
@@ -2022,7 +2037,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
 
           const bType = (bld.properties as Record<string, any> | undefined)?.type;
           const isCritical = Boolean(bType && ['school', 'clinic', 'panchayat', 'water_facility'].includes(bType));
-          const color =
+          const baseColor =
             bType === 'school'
               ? '#4f46e5'
               : bType === 'clinic'
@@ -2039,18 +2054,48 @@ export const VillageMap: React.FC<VillageMapProps> = ({
               ? '#ea580c'
               : '#475569';
 
+          const props: Record<string, any> = (bld.properties as Record<string, any>) || {};
+          const bId: string = String(props.osm_id || props.osmId || props.id || 'N/A');
+
+          // Check if building is affected in active simulation frame
+          const simBld = affectedBuildings?.find(
+            (ab) => ab.id === bId || ab.id === props.id || ab.id === String(props.osm_id)
+          );
+
+          let strokeColor = isCritical ? '#0f172a' : '#1e293b';
+          let fillColor = baseColor;
+          let fillOpacity = 0.5;
+          let weight = isCritical ? 2 : 1.5;
+
+          if (simBld && simBld.depth_m > 0) {
+            if (simBld.risk === 'severe') {
+              strokeColor = '#dc2626';
+              fillColor = '#ef4444';
+              fillOpacity = 0.75;
+              weight = 2.5;
+            } else if (simBld.risk === 'moderate') {
+              strokeColor = '#d97706';
+              fillColor = '#f59e0b';
+              fillOpacity = 0.65;
+              weight = 2.2;
+            } else if (simBld.risk === 'low') {
+              strokeColor = '#0284c7';
+              fillColor = '#38bdf8';
+              fillOpacity = 0.55;
+              weight = 2.0;
+            }
+          }
+
           const poly = L.polygon(latLngs, {
-            color: isCritical ? '#0f172a' : '#1e293b',
-            weight: isCritical ? 2 : 1.5,
-            fillColor: color,
-            fillOpacity: 0.5,
+            color: strokeColor,
+            weight,
+            fillColor,
+            fillOpacity,
             pane: 'buildingsPane',
           });
 
           const center = poly.getBounds().getCenter();
-          const props: Record<string, any> = (bld.properties as Record<string, any>) || {};
           const bName: string = props.name || 'Building Footprint';
-          const bId: string = String(props.osm_id || props.osmId || props.id || 'N/A');
           const bTypeLabel: string = String(props.type || props.building_use || 'General').toUpperCase();
           const groundElev = props.ground_elevation_m !== undefined
             ? `${props.ground_elevation_m}m`
@@ -2076,6 +2121,22 @@ export const VillageMap: React.FC<VillageMapProps> = ({
             ? 'Synthetic Demo Placeholder (Illustrative)'
             : String(props.source || props.provenance || 'OpenStreetMap Building Footprints');
 
+          const simHtml = simBld && simBld.depth_m > 0 ? `
+            <div style="background: ${simBld.risk === 'severe' ? '#fef2f2' : simBld.risk === 'moderate' ? '#fffbeb' : '#f0f9ff'}; border: 1px solid ${simBld.risk === 'severe' ? '#fecaca' : simBld.risk === 'moderate' ? '#fde68a' : '#bae6fd'}; border-radius: 6px; padding: 6px; margin-bottom: 6px;">
+              <div style="display: flex; justify-content: space-between; align-items: center;">
+                <strong style="color: ${simBld.risk === 'severe' ? '#b91c1c' : simBld.risk === 'moderate' ? '#b45309' : '#0369a1'}; font-size: 11px;">
+                  ${simBld.risk === 'severe' ? '⚠️ PLINTH OVERTOPPED (SEVERE FLOOD)' : simBld.risk === 'moderate' ? '⚠️ AT RISK OF INGRESS (MODERATE)' : 'ℹ️ PERIMETER WATERLOGGED (LOW RISK)'}
+                </strong>
+              </div>
+              <div style="font-size: 10px; color: #334155; margin-top: 2px;">
+                Simulated Inundation Depth: <strong>${simBld.depth_m.toFixed(2)}m</strong> (${Math.round(simBld.depth_m * 100)} cm)
+              </div>
+              <div style="font-size: 9px; color: #64748b; margin-top: 2px;">
+                ${simBld.statusNote || 'Illustrative Rational-Depression screening estimate (Not Ground Truth)'}
+              </div>
+            </div>
+          ` : '';
+
           const popupHtml = `
             <div style="font-family: system-ui, -apple-system, sans-serif; font-size: 12px; color: #1e293b; padding: 2px;">
               <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px;">
@@ -2087,6 +2148,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
               <h4 style="margin: 0 0 6px 0; font-size: 13px; font-weight: 700; color: #0f172a; line-height: 1.25;">
                 ${bName}
               </h4>
+              ${simHtml}
               <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px; margin-bottom: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; font-size: 11px;">
                 <div><span style="color: #64748b;">Ground Elev:</span> <strong style="color: #0f172a;">${groundElev}</strong></div>
                 <div><span style="color: #64748b;">Plinth Elev:</span> <strong style="color: #0f172a;">${plinthElev}</strong></div>
@@ -2118,7 +2180,10 @@ export const VillageMap: React.FC<VillageMapProps> = ({
             L.DomEvent.stopPropagation(e);
             onSelectFeature?.({
               category: 'building',
-              properties: bld.properties,
+              properties: {
+                ...bld.properties,
+                simulationInundation: simBld,
+              },
               geometry: bld.geometry,
               coordinates: [e.latlng.lng, e.latlng.lat],
             });
@@ -2132,7 +2197,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
       console.warn('Error rendering buildings:', err);
       performanceTracker.updateMapLayer({ id: 'buildings', status: 'error', error: String(err) });
     }
-  }, [dataset.buildings, visibleLayers.buildings]);
+  }, [dataset.buildings, visibleLayers.buildings, affectedBuildings, onSelectFeature]);
 
   // 12. Render Flood Inundation Depth Overlays (Translucent, Visible Cyan-Blue Depth Palette)
   useEffect(() => {
@@ -2199,15 +2264,18 @@ export const VillageMap: React.FC<VillageMapProps> = ({
               <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; padding-right: 20px;">
                 <span style="width: 10px; height: 10px; border-radius: 9999px; background-color: ${fillColor}; flex-shrink: 0;"></span>
                 <h4 style="font-size: 12px; font-weight: 700; color: #0f172a; margin: 0;">
-                  Simulated Inundation Extent (${feat.properties?.category?.toUpperCase() || 'FLOOD'})
+                  Simulated Inundation (${feat.properties?.category?.toUpperCase() || 'PLUVIAL'})
                 </h4>
+              </div>
+              <div style="font-size: 9px; font-weight: 700; text-transform: uppercase; color: #6b21a8; background: #f3e8ff; border: 1px solid #d8b4fe; padding: 2px 6px; border-radius: 4px; margin-bottom: 4px; display: inline-block;">
+                Illustrative Screening Model · Not Verified Ground Truth
               </div>
               <div style="display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; background: #f0f9ff; border: 1px solid #bae6fd; padding: 4px 6px; border-radius: 4px;">
                 <span style="color: #0369a1; font-weight: 600;">Water Depth:</span>
                 <span style="font-weight: 800; color: #0284c7;">${depth.toFixed(2)} m (${Math.round(depth * 100)} cm)</span>
               </div>
               <div style="font-size: 10px; color: #475569; line-height: 1.4;">
-                Physical pluvial ponding footprint based on local topographic depressions and infiltration rate.
+                Physical pluvial ponding footprint based on local topographic depressions and infiltration rate. Building ingress depends on surveyed plinth heights.
               </div>
             </div>
           `;

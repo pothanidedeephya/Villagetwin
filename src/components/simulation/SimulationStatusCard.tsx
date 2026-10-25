@@ -200,28 +200,46 @@ export const SimulationStatusCard: React.FC<SimulationStatusCardProps> = ({
         {/* Expandable Detailed Statistics Panel */}
         {isExpanded && (
           <div className="pt-2 border-t border-slate-100 space-y-2 text-[11px] animate-in fade-in duration-150">
-            <div className="grid grid-cols-2 gap-2 text-[10px]">
-              <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 rounded-lg">
-                <Route className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                <div>
-                  <span className="text-slate-500 block">Affected Roads:</span>
-                  <span className="font-bold text-slate-800">
-                    {(simulationResult.affectedRoads || []).filter((r) => r.depth_m > 0).length} of{' '}
-                    {simulationResult.affectedRoads?.length || 0}
-                  </span>
-                </div>
-              </div>
+            {(() => {
+              const activeRoads = currentFrame?.affectedRoads ?? simulationResult.affectedRoads ?? [];
+              const activeBuildings = currentFrame?.affectedBuildings ?? simulationResult.affectedBuildings ?? [];
+              const floodedRoadsCount = activeRoads.filter((r) => r.status === 'flooded' || r.depth_m > 0.25).length;
+              const affectedRoadsCount = activeRoads.filter((r) => r.status === 'affected' || (r.depth_m > 0 && r.depth_m <= 0.25)).length;
+              const floodedBldCount = activeBuildings.filter((b) => b.risk === 'severe' || b.risk === 'moderate').length;
+              const isUnmapped = simulationResult.buildingExposureStatus === 'unavailable_unmapped';
 
-              <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 rounded-lg">
-                <Building2 className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                <div>
-                  <span className="text-slate-500 block">Flooded Dwellings:</span>
-                  <span className="font-bold text-slate-800">
-                    {(simulationResult.affectedBuildings || []).filter((b) => b.risk !== 'safe').length}
-                  </span>
+              return (
+                <div className="grid grid-cols-2 gap-2 text-[10px]">
+                  <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 rounded-lg">
+                    <Route className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <div>
+                      <span className="text-slate-500 block">Road Exposure:</span>
+                      <span className="font-bold text-slate-800">
+                        {floodedRoadsCount > 0
+                          ? `${floodedRoadsCount} severed`
+                          : affectedRoadsCount > 0
+                          ? `${affectedRoadsCount} caution`
+                          : '0 impassable'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 p-1.5 bg-slate-50 rounded-lg">
+                    <Building2 className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                    <div>
+                      <span className="text-slate-500 block">Flooded Dwellings:</span>
+                      <span className="font-bold text-slate-800">
+                        {isUnmapped ? (
+                          <span className="text-slate-500 italic">Unmapped</span>
+                        ) : (
+                          `${floodedBldCount} structures`
+                        )}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
+              );
+            })()}
 
             <div className="p-2 bg-blue-50/60 border border-blue-100 rounded-lg space-y-1 text-[10px] text-slate-600">
               <div className="flex justify-between">

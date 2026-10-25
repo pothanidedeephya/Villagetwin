@@ -445,4 +445,127 @@ describe('Bharat Village Twin — Time-Based Flood & Cyclone Simulation Tests', 
       }, 120);
     });
   });
+
+  // =========================================================================
+  // TEST 13: Time-Dependent 4-State Road Inundation Classification
+  // =========================================================================
+  describe('13. Time-Dependent 4-State Road Classification', () => {
+    it('classifies roads into flooded (>0.25m), affected (0-0.25m), unaffected, and unverified', async () => {
+      const config: SimulationConfig = {
+        scenario: 'existing_drainage',
+        rainfallIntensity_mmh: 65,
+        rainfallDuration_hours: 4,
+        soilType: 'black_cotton',
+        infiltrationRate_mmh: 6.0,
+        runoffCoefficient: 0.65,
+        tideOutfallCondition: 'normal',
+        desiltingFactor: 0.65,
+        timeStep_mins: 60,
+      };
+
+      const result = await defaultSimulationEngine.runSimulation(DEMO_VILLAGE, config);
+      assert.ok(result.frames.length >= 8);
+
+      // Frame 0: Dry conditions before storm arrival
+      const frame0 = result.frames[0];
+      assert.ok(frame0.affectedRoads !== undefined);
+      const frame0Flooded = frame0.affectedRoads?.filter((r) => r.status === 'flooded') || [];
+      assert.strictEqual(frame0Flooded.length, 0, 'No roads should be flooded at hour 0');
+
+      // Peak frame: Heavy inundation
+      const peakFrame = result.frames.find((f) => f.hour === result.peakHour) || result.frames[result.peakHour];
+      assert.ok(peakFrame.affectedRoads !== undefined && peakFrame.affectedRoads.length > 0);
+
+      // Check valid statuses
+      const validStatuses = new Set(['flooded', 'affected', 'unaffected', 'unverified']);
+      peakFrame.affectedRoads.forEach((r) => {
+        assert.ok(r.status && validStatuses.has(r.status), `Road ${r.id} has invalid status ${r.status}`);
+        if (r.status === 'flooded') {
+          assert.ok(r.depth_m > 0.25, 'Flooded road must have depth > 0.25m');
+          assert.strictEqual(r.impassable, true, 'Flooded road must be marked impassable');
+        } else if (r.status === 'affected') {
+          assert.ok(r.depth_m > 0 && r.depth_m <= 0.25, 'Affected road must have depth 0-0.25m');
+          assert.strictEqual(r.impassable, false, 'Affected road must remain passable for emergency high-clearance vehicles');
+        } else if (r.status === 'unaffected') {
+          assert.strictEqual(r.depth_m, 0, 'Unaffected road must have zero inundation depth');
+          assert.strictEqual(r.impassable, false);
+        } else if (r.status === 'unverified') {
+          assert.ok(r.statusNote?.includes('unverified') || r.statusNote?.includes('Do not assume safe'));
+        }
+      });
+
+      // Recession frame: depth and flooded count must decrease from peak
+      const recessionFrame = result.frames[result.frames.length - 1];
+      const peakFloodedCount = peakFrame.affectedRoads.filter((r) => r.status === 'flooded').length;
+      const recessionFloodedCount = recessionFrame.affectedRoads?.filter((r) => r.status === 'flooded').length || 0;
+      assert.ok(
+        recessionFloodedCount <= peakFloodedCount,
+        'Recession frame must have fewer or equal flooded roads compared to storm peak'
+      );
+    });
+  });
+
+  // =========================================================================
+  // TEST 14: Building Exposure Spatial Intersection & Model Scope Metadata
+  // =========================================================================
+  describe('14. Building Exposure Spatial Intersection & Screening Scope Metadata', () => {
+    it('evaluates building plinth overtopping dynamically and tags simulation as simplified screening', async () => {
+      const config: SimulationConfig = {
+        scenario: 'existing_drainage',
+        rainfallIntensity_mmh: 65,
+        rainfallDuration_hours: 4,
+        soilType: 'black_cotton',
+        infiltrationRate_mmh: 6.0,
+        runoffCoefficient: 0.65,
+        tideOutfallCondition: 'normal',
+        desiltingFactor: 0.65,
+        timeStep_mins: 60,
+      };
+
+      const result = await defaultSimulationEngine.runSimulation(DEMO_VILLAGE, config);
+
+      // Model metadata checks
+      assert.strictEqual(result.hydrodynamicStatus, 'simplified_rational_hypsometric');
+      assert.ok(result.modelDescription?.includes('Simplified 2D Rational-Depression Solver'));
+      assert.ok(result.modelScopeNote?.includes('DEM hypsometry'));
+
+      // Check peak frame building exposure
+      const peakFrame = result.frames.find((f) => f.hour === result.peakHour) || result.frames[result.peakHour];
+      assert.ok(peakFrame.affectedBuildings !== undefined && peakFrame.affectedBuildings.length > 0);
+
+      const severeBuildings = peakFrame.affectedBuildings.filter((b) => b.risk === 'severe');
+      severeBuildings.forEach((b) => {
+        assert.ok(b.depth_m > 0, 'Severe building must have positive depth');
+        assert.ok(b.statusNote?.toLowerCase().includes('severe') || b.statusNote?.includes('above plinth'));
+      });
+
+      // Hour 0 buildings must be safe
+      const frame0 = result.frames[0];
+      const frame0Affected = frame0.affectedBuildings?.filter((b) => b.risk !== 'safe') || [];
+      assert.strictEqual(frame0Affected.length, 0, 'No buildings should be flooded at hour 0 antecedent condition');
+    });
+
+    it('reports unavailable_unmapped status when building footprints are absent without fabricating dwellings', async () => {
+      const villageNoBld: VillageDataset = {
+        ...DEMO_VILLAGE,
+        buildings: { type: 'FeatureCollection', features: [] },
+      };
+
+      const config: SimulationConfig = {
+        scenario: 'baseline',
+        rainfallIntensity_mmh: 50,
+        rainfallDuration_hours: 3,
+        soilType: 'alluvial_clay',
+        infiltrationRate_mmh: 8.0,
+        runoffCoefficient: 0.7,
+        tideOutfallCondition: 'normal',
+        desiltingFactor: 0.7,
+      };
+
+      const result = await defaultSimulationEngine.runSimulation(villageNoBld, config);
+      assert.strictEqual(result.buildingExposureStatus, 'unavailable_unmapped');
+      assert.strictEqual(result.affectedBuildings?.length, 0);
+      assert.ok(result.modelScopeNote?.includes('Building footprint exposure unavailable'));
+    });
+  });
 });

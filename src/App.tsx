@@ -494,6 +494,24 @@ export default function App() {
     return getSimulationFloodFrameGeoJson(latestResult, activeFloodHour);
   }, [latestResult, activeFloodHour]);
 
+  // Frame-specific affected roads synchronized with simulation time
+  const activeAffectedRoads = useMemo(() => {
+    if (!latestResult) return [];
+    if (activeFloodHour !== null && activeFloodHour !== undefined && latestResult.frames?.[activeFloodHour]?.affectedRoads) {
+      return latestResult.frames[activeFloodHour].affectedRoads;
+    }
+    return latestResult.affectedRoads || [];
+  }, [latestResult, activeFloodHour]);
+
+  // Frame-specific affected buildings synchronized with simulation time
+  const activeAffectedBuildings = useMemo(() => {
+    if (!latestResult) return [];
+    if (activeFloodHour !== null && activeFloodHour !== undefined && latestResult.frames?.[activeFloodHour]?.affectedBuildings) {
+      return latestResult.frames[activeFloodHour].affectedBuildings;
+    }
+    return latestResult.affectedBuildings || [];
+  }, [latestResult, activeFloodHour]);
+
   // Flood simulation playback interval timer (Parts 2 & 4)
   useEffect(() => {
     if (!isFloodPlaying || !latestResult?.frames || latestResult.frames.length === 0) {
@@ -2092,7 +2110,8 @@ export default function App() {
               isSimulating={isSimulating}
               onRunSimulation={() => runFullSimulation(simConfig)}
               scenarioName={latestResult.scenario}
-              affectedRoads={latestResult?.affectedRoads}
+              affectedRoads={activeAffectedRoads}
+              affectedBuildings={activeAffectedBuildings}
               selectedFeature={selectedFeature}
               onSelectFeature={setSelectedFeature}
               activeHazardPolygons={activeHazardPolygons}

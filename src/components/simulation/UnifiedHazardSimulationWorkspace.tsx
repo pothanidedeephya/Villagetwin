@@ -196,8 +196,15 @@ export const UnifiedHazardSimulationWorkspace: React.FC<UnifiedHazardSimulationW
     : 'Building impact unavailable (no footprint dataset)';
 
   const hasRoadsData = !!(dataset?.roads?.features && dataset.roads.features.length > 0);
+  const activeFrameRoads = currentFloodFrame?.affectedRoads ?? (floodResult?.affectedRoads || []);
+  const floodedRoadCount = activeFrameRoads.filter((r) => r.status === 'flooded' || r.depth_m > 0.25).length;
+  const affectedRoadCount = activeFrameRoads.filter((r) => r.status === 'affected' || (r.depth_m > 0 && r.depth_m <= 0.25)).length;
   const roadExposureText = hasRoadsData
-    ? `${currentFloodFrame?.affectedRoadsKm ?? 0} km affected`
+    ? floodedRoadCount > 0
+      ? `${floodedRoadCount} severed (${currentFloodFrame?.affectedRoadsKm ?? 0} km)`
+      : affectedRoadCount > 0
+      ? `${affectedRoadCount} waterlogged (${currentFloodFrame?.affectedRoadsKm ?? 0} km)`
+      : `${currentFloodFrame?.affectedRoadsKm ?? 0} km affected`
     : 'Road impact unavailable';
 
   const hasFloodResult = !!(
