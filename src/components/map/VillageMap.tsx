@@ -491,6 +491,10 @@ export const VillageMap: React.FC<VillageMapProps> = ({
   const [mapZoom, setMapZoom] = useState<number>(16);
   const [mapViewportRev, setMapViewportRev] = useState<number>(0);
   const [viewportRoads, setViewportRoads] = useState<Array<any>>([]);
+  const [isRoadsLoading, setIsRoadsLoading] = useState<boolean>(false);
+  const [roadsStatus, setRoadsStatus] = useState<'loading' | 'available' | 'unmapped' | 'error'>('loading');
+  const [roadsProvider, setRoadsProvider] = useState<string>('OpenStreetMap / National Roadways');
+  const [totalRoadsCount, setTotalRoadsCount] = useState<number>(0);
   const roadReqIdRef = useRef<number>(0);
   const [isSimCardDismissed, setIsSimCardDismissed] = useState<boolean>(false);
   const [showHazardDetails, setShowHazardDetails] = useState<boolean>(false);
@@ -1605,6 +1609,7 @@ export const VillageMap: React.FC<VillageMapProps> = ({
   useEffect(() => {
     if (!visibleLayers.roads) {
       setViewportRoads([]);
+      setIsRoadsLoading(false);
       return;
     }
     const map = mapRef.current;
@@ -1623,15 +1628,32 @@ export const VillageMap: React.FC<VillageMapProps> = ({
       maxLat: bounds.getNorth(),
     };
 
+    setIsRoadsLoading(true);
+    setRoadsStatus('loading');
+    performanceTracker.updateMapLayer({ id: 'roads', status: 'loading', visible: true });
+
     fetchRoadsForViewport(vpBounds, map.getZoom(), abortController.signal)
       .then((res) => {
-        if (reqId === roadReqIdRef.current && res?.roads?.features) {
-          setViewportRoads(res.roads.features);
+        if (reqId === roadReqIdRef.current) {
+          setIsRoadsLoading(false);
+          setRoadsProvider(res.source);
+          if (res?.roads?.features && res.roads.features.length > 0) {
+            setViewportRoads(res.roads.features);
+            setRoadsStatus('available');
+          } else {
+            setViewportRoads([]);
+            setRoadsStatus(res?.status === 'error' ? 'error' : 'unmapped');
+          }
         }
       })
       .catch((err) => {
         if (err.name !== 'AbortError') {
           console.warn('[VillageMap] Viewport roads fetch warning:', err);
+          if (reqId === roadReqIdRef.current) {
+            setIsRoadsLoading(false);
+            setRoadsStatus('error');
+            performanceTracker.updateMapLayer({ id: 'roads', status: 'error', visible: true, error: String(err) });
+          }
         }
       });
 
@@ -1655,20 +1677,21 @@ export const VillageMap: React.FC<VillageMapProps> = ({
     const roadMap = new Map<string, any>();
 
     // Register local dataset roads
-    datasetFeatures.forEach((rd: any) => {
-      const id = rd.properties?.id || `ds_${rd.properties?.name || ''}_${Math.random()}`;
+    datasetFeatures.forEach((rd: any, idx: number) => {
+      const id = rd.properties?.id || rd.id || `ds_${idx}_${rd.properties?.name || ''}`;
       roadMap.set(id, rd);
     });
 
-    // Register viewport roads
-    viewportRoads.forEach((rd: any) => {
-      const id = rd.properties?.id || `vp_${rd.properties?.name || ''}_${rd.geometry?.coordinates?.[0]?.[0]}`;
+    // Register viewport roads with deduplication
+    viewportRoads.forEach((rd: any, idx: number) => {
+      const id = rd.properties?.id || rd.id || `vp_${idx}_${rd.geometry?.coordinates?.[0]?.[0]}`;
       if (!roadMap.has(id)) {
         roadMap.set(id, rd);
       }
     });
 
     const allRoads = Array.from(roadMap.values());
+    setTotalRoadsCount(allRoads.length);
     if (allRoads.length === 0) {
       performanceTracker.updateMapLayer({ id: 'roads', visible: true, status: 'empty_unmapped', featureCount: 0, renderDurationMs: 0 });
       return;
@@ -1834,8 +1857,11 @@ export const VillageMap: React.FC<VillageMapProps> = ({
 
           // Interactive Tooltip distinguishing Base Road from Evacuation Lifelines
           const isVettedEvac = Boolean(rd.properties?.isEvacuationCorridor);
+          const isCandidate = Boolean(rd.properties?.isCandidateRoute);
           const networkBadge = isVettedEvac
             ? `<span style="display:inline-block; background:#e0f2fe; color:#0369a1; padding:1px 5px; border-radius:3px; font-weight:700; font-size:9px;">★ VETTED EVACUATION CORRIDOR</span>`
+            : isCandidate
+            ? `<span style="display:inline-block; background:#fef3c7; color:#92400e; padding:1px 5px; border-radius:3px; font-weight:700; font-size:9px;">⚠️ CANDIDATE ROUTE (UNVALIDATED)</span>`
             : `<span style="display:inline-block; background:#f1f5f9; color:#475569; padding:1px 5px; border-radius:3px; font-weight:600; font-size:9px;">BASE ROAD NETWORK</span>`;
 
           const statusBadge =
@@ -1893,12 +1919,19 @@ export const VillageMap: React.FC<VillageMapProps> = ({
           group.addLayer(line);
         });
       });
+      performanceTracker.updateMapLayer({
+        id: 'roads',
+        visible: true,
+        status: 'rendered',
+        source: roadsProvider,
+        featureCount: allRoads.length,
+      });
       performanceTracker.recordLayerDuration('roads', performance.now() - t0, allRoads.length);
     } catch (err) {
       console.warn('Error rendering roads:', err);
       performanceTracker.updateMapLayer({ id: 'roads', status: 'error', error: String(err) });
     }
-  }, [dataset.roads, viewportRoads, visibleLayers.roads, affectedRoads, activeHazardPolygons, onSelectFeature]);
+  }, [dataset.roads, viewportRoads, visibleLayers.roads, affectedRoads, activeHazardPolygons, roadsProvider, onSelectFeature]);
 
   // 10. Render Drainage Lines
   useEffect(() => {
@@ -3308,45 +3341,49 @@ export const VillageMap: React.FC<VillageMapProps> = ({
         }
 
         // 4. Origin Marker ("A" in Green Pin)
-        const originLatLng = toLatLng(navigationResult.origin.coordinates);
-        const originIcon = L.divIcon({
-          html: `
-            <div style="background: #10b981; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; border: 2.5px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.35);">
-              A
-            </div>
-          `,
-          className: 'nav-origin-marker',
-          iconSize: [26, 26],
-          iconAnchor: [13, 13],
-        });
-        const originMarker = L.marker(originLatLng, { icon: originIcon, pane: 'navRoutePane' });
-        originMarker.bindPopup(`<b>Starting Point (A):</b><br/>${navigationResult.origin.name}`, {
-          className: 'bvt-compact-popup',
-        });
-        group.addLayer(originMarker);
+        if (navigationResult.origin?.coordinates && navigationResult.origin.coordinates.length >= 2) {
+          const originLatLng = toLatLng(navigationResult.origin.coordinates);
+          const originIcon = L.divIcon({
+            html: `
+              <div style="background: #10b981; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; border: 2.5px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.35);">
+                A
+              </div>
+            `,
+            className: 'nav-origin-marker',
+            iconSize: [26, 26],
+            iconAnchor: [13, 13],
+          });
+          const originMarker = L.marker(originLatLng, { icon: originIcon, pane: 'navRoutePane' });
+          originMarker.bindPopup(`<b>Starting Point (A):</b><br/>${navigationResult.origin.name || 'Starting Point'}`, {
+            className: 'bvt-compact-popup',
+          });
+          group.addLayer(originMarker);
+        }
 
         // 5. Destination Marker ("B" in Red Pin)
-        const destLatLng = toLatLng(navigationResult.destination.coordinates);
-        const destIcon = L.divIcon({
-          html: `
-            <div style="background: #ef4444; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; border: 2.5px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.35);">
-              B
-            </div>
-          `,
-          className: 'nav-dest-marker',
-          iconSize: [26, 26],
-          iconAnchor: [13, 13],
-        });
-        const destMarker = L.marker(destLatLng, { icon: destIcon, pane: 'navRoutePane' });
-        destMarker.bindPopup(
-          `<b>Destination (B):</b><br/>${navigationResult.destination.name}<br/><b>Distance:</b> ${(
-            activeRoute.totalDistance_m / 1000
-          ).toFixed(2)} km<br/><b>Est. Driving Time:</b> ${activeRoute.estimatedDrivingMinutes} mins<br/><b>Status:</b> ${
-            activeRoute.clearanceStatus
-          }`,
-          { className: 'bvt-compact-popup' }
-        );
-        group.addLayer(destMarker);
+        if (navigationResult.destination?.coordinates && navigationResult.destination.coordinates.length >= 2) {
+          const destLatLng = toLatLng(navigationResult.destination.coordinates);
+          const destIcon = L.divIcon({
+            html: `
+              <div style="background: #ef4444; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px; border: 2.5px solid white; box-shadow: 0 4px 10px rgba(0,0,0,0.35);">
+                B
+              </div>
+            `,
+            className: 'nav-dest-marker',
+            iconSize: [26, 26],
+            iconAnchor: [13, 13],
+          });
+          const destMarker = L.marker(destLatLng, { icon: destIcon, pane: 'navRoutePane' });
+          const distanceKm =
+            activeRoute.totalDistance_m != null ? (activeRoute.totalDistance_m / 1000).toFixed(2) : '0.00';
+          const drivingMins = activeRoute.estimatedDrivingMinutes ?? 0;
+          const statusText = activeRoute.clearanceStatus || 'Active';
+          destMarker.bindPopup(
+            `<b>Destination (B):</b><br/>${navigationResult.destination.name || 'Destination'}<br/><b>Distance:</b> ${distanceKm} km<br/><b>Est. Driving Time:</b> ${drivingMins} mins<br/><b>Status:</b> ${statusText}`,
+            { className: 'bvt-compact-popup' }
+          );
+          group.addLayer(destMarker);
+        }
 
         // 6. Fit Bounds smoothly to the active route
         if (mapRef.current && activeLatLngs.length > 1) {
@@ -3667,9 +3704,21 @@ export const VillageMap: React.FC<VillageMapProps> = ({
                           <Route className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                           <span>Road Network</span>
                         </span>
-                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-bold">
-                          {dataset.roads?.features?.length || 0}
-                        </span>
+                        <div className="flex items-center gap-1">
+                          {isRoadsLoading ? (
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-100/70 text-amber-800 animate-pulse">
+                              Loading...
+                            </span>
+                          ) : totalRoadsCount === 0 && (dataset.roads?.features?.length || 0) === 0 ? (
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-medium">
+                              Unmapped
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-bold">
+                              {totalRoadsCount || dataset.roads?.features?.length || 0}
+                            </span>
+                          )}
+                        </div>
                       </button>
 
                       {/* 3. Building Footprints */}

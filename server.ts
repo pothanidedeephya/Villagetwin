@@ -344,9 +344,36 @@ app.get('/api/geo/search', async (req: Request, res: Response) => {
   return res.json({ results: [] });
 });
 
+// Bounded cache with TTL for viewport road bounds to avoid memory leaks
+interface RoadBoundsCacheEntry {
+  data: any;
+  timestamp: number;
+}
+const ROAD_BOUNDS_CACHE_MAX_ENTRIES = 200;
+const ROAD_BOUNDS_CACHE_TTL_MS = 15 * 60 * 1000; // 15 min TTL
+const roadBoundsCache = new Map<string, RoadBoundsCacheEntry>();
+
+function getRoadBoundsCache(key: string): any | null {
+  const entry = roadBoundsCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > ROAD_BOUNDS_CACHE_TTL_MS) {
+    roadBoundsCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setRoadBoundsCache(key: string, data: any): void {
+  if (roadBoundsCache.size >= ROAD_BOUNDS_CACHE_MAX_ENTRIES) {
+    const oldestKey = roadBoundsCache.keys().next().value;
+    if (oldestKey) roadBoundsCache.delete(oldestKey);
+  }
+  roadBoundsCache.set(key, { data, timestamp: Date.now() });
+}
+
 /**
  * 2A. Viewport Road Network Engine:
- * Returns geographically accurate, road vectors for any visible viewport in India
+ * Returns geographically accurate road vectors for any visible viewport in India
  * based on zoom level and bounding box, with tile caching and spatial deduplication.
  */
 app.get('/api/geo/roads-in-bounds', async (req: Request, res: Response) => {
@@ -357,27 +384,81 @@ app.get('/api/geo/roads-in-bounds', async (req: Request, res: Response) => {
     const maxLat = parseFloat(req.query.maxLat as string);
     const zoom = parseFloat(req.query.zoom as string) || 14;
 
-    if (isNaN(minLng) || isNaN(minLat) || isNaN(maxLng) || isNaN(maxLat)) {
+    if (!isFinite(minLng) || !isFinite(minLat) || !isFinite(maxLng) || !isFinite(maxLat)) {
       return res.status(400).json({ error: 'Valid minLng, minLat, maxLng, maxLat query parameters are required.' });
     }
 
-    const cacheKey = `roads-bounds-${minLng.toFixed(3)}-${minLat.toFixed(3)}-${maxLng.toFixed(3)}-${maxLat.toFixed(3)}-z${Math.round(zoom)}`;
-    if (geospatialCache.has(cacheKey)) {
-      return res.json(geospatialCache.get(cacheKey));
+    if (minLng >= maxLng || minLat >= maxLat) {
+      return res.status(400).json({ error: 'Inverted bounding box: minLng must be < maxLng and minLat must be < maxLat.' });
     }
 
-    // 1. Try Live OpenStreetMap Overpass with timeout protection
+    // Broad Indian territorial bounding envelope (~68.0°E to 98.0°E, 6.0°N to 38.0°N)
+    const INDIA_BBOX = { minLng: 68.0, minLat: 6.0, maxLng: 98.0, maxLat: 38.0 };
+    const intersectsIndia =
+      maxLng >= INDIA_BBOX.minLng &&
+      minLng <= INDIA_BBOX.maxLng &&
+      maxLat >= INDIA_BBOX.minLat &&
+      minLat <= INDIA_BBOX.maxLat;
+
+    if (!intersectsIndia) {
+      return res.json({
+        type: 'FeatureCollection',
+        features: [],
+        metadata: {
+          provider: 'OpenStreetMap / National Roadways',
+          featureCount: 0,
+          zoom,
+          bbox: [minLng, minLat, maxLng, maxLat],
+          status: 'unmapped',
+          message: 'Viewport is outside India coverage boundaries.',
+          retrievedAt: new Date().toISOString(),
+        },
+      });
+    }
+
+    // Enforce safe span limit to prevent giant queries from overloading Overpass
+    // Low zoom (<10): allow up to 1.5° (highways only)
+    // Mid zoom (10-13): allow up to 0.75°
+    // High zoom (>=14): allow up to 0.35° (~35 km)
+    const spanLng = maxLng - minLng;
+    const spanLat = maxLat - minLat;
+    const maxSpan = zoom < 10 ? 1.5 : zoom < 14 ? 0.75 : 0.35;
+
+    let clampedMinLng = minLng;
+    let clampedMaxLng = maxLng;
+    let clampedMinLat = minLat;
+    let clampedMaxLat = maxLat;
+
+    if (spanLng > maxSpan || spanLat > maxSpan) {
+      const cLng = (minLng + maxLng) / 2;
+      const cLat = (minLat + maxLat) / 2;
+      const halfSpanLng = Math.min(spanLng, maxSpan) / 2;
+      const halfSpanLat = Math.min(spanLat, maxSpan) / 2;
+      clampedMinLng = cLng - halfSpanLng;
+      clampedMaxLng = cLng + halfSpanLng;
+      clampedMinLat = cLat - halfSpanLat;
+      clampedMaxLat = cLat + halfSpanLat;
+    }
+
+    const cacheKey = `roads-bounds-${clampedMinLng.toFixed(3)}-${clampedMinLat.toFixed(3)}-${clampedMaxLng.toFixed(3)}-${clampedMaxLat.toFixed(3)}-z${Math.round(zoom)}`;
+    const cached = getRoadBoundsCache(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+
+    // 1. Try Live OpenStreetMap Overpass with timeout protection & zoom-based filter
     let osmFeatures: any[] = [];
     try {
-      const bbox: [number, number, number, number] = [minLng, minLat, maxLng, maxLat];
-      const center: [number, number] = [(minLng + maxLng) / 2, (minLat + maxLat) / 2];
-      const osmRoads = await queryOpenStreetMapRoads(bbox, center, 25.0);
+      const bbox: [number, number, number, number] = [clampedMinLng, clampedMinLat, clampedMaxLng, clampedMaxLat];
+      const center: [number, number] = [(clampedMinLng + clampedMaxLng) / 2, (clampedMinLat + clampedMaxLat) / 2];
+      const osmRoads = await queryOpenStreetMapRoads(bbox, center, 25.0, zoom);
       if (osmRoads.status === 'available' && Array.isArray(osmRoads.features) && osmRoads.features.length > 0) {
         osmFeatures = osmRoads.features.map((f: any) => ({
           ...f,
           properties: {
             ...f.properties,
             isEvacuationCorridor: false, // Ensure base roads are not marked as evacuation corridors
+            isCandidateRoute: false,
           },
         }));
       }
@@ -385,17 +466,26 @@ app.get('/api/geo/roads-in-bounds', async (req: Request, res: Response) => {
       // Overpass unavailable or timed out; will fall back to national roadways database
     }
 
-    // 2. Query Authoritative National Roadways & Curated Regional Catalogs
-    const nationalCatalog = queryNationwideRoadwaysInBounds(minLng, minLat, maxLng, maxLat, zoom);
+    // 2. Query Authoritative National Roadways & Curated Regional Catalogs (allowProcedural: false)
+    const nationalCatalog = queryNationwideRoadwaysInBounds(clampedMinLng, clampedMinLat, clampedMaxLng, clampedMaxLat, zoom, { allowProcedural: false });
 
     // Merge features with deduplication
     const featureMap = new Map<string, any>();
     nationalCatalog.features.forEach((f: any) => {
-      const fid = f.properties?.id || f.id || `${f.geometry?.coordinates?.[0]?.[0]}-${f.geometry?.coordinates?.[0]?.[1]}`;
-      featureMap.set(fid, f);
+      if (!f || !f.geometry || !f.geometry.coordinates || f.geometry.coordinates.length < 2) return;
+      const fid = f.properties?.id || f.id || `${f.geometry.coordinates[0][0]}-${f.geometry.coordinates[0][1]}`;
+      featureMap.set(fid, {
+        ...f,
+        properties: {
+          ...f.properties,
+          isEvacuationCorridor: false,
+          isCandidateRoute: false,
+        },
+      });
     });
     osmFeatures.forEach((f: any) => {
-      const fid = f.properties?.id || f.id || `${f.geometry?.coordinates?.[0]?.[0]}-${f.geometry?.coordinates?.[0]?.[1]}`;
+      if (!f || !f.geometry || !f.geometry.coordinates || f.geometry.coordinates.length < 2) return;
+      const fid = f.properties?.id || f.id || `${f.geometry.coordinates[0][0]}-${f.geometry.coordinates[0][1]}`;
       featureMap.set(fid, f);
     });
 
@@ -405,16 +495,18 @@ app.get('/api/geo/roads-in-bounds', async (req: Request, res: Response) => {
       type: 'FeatureCollection',
       features: mergedFeatures,
       metadata: {
-        provider: osmFeatures.length > 0 ? 'OpenStreetMap Overpass API & NHAI Regional Catalogs' : 'NHAI / Survey of India / PMGSY Roadway Database',
+        provider: osmFeatures.length > 0 ? 'OpenStreetMap Overpass API' : mergedFeatures.length > 0 ? 'NHAI Curated Roadway Catalog' : 'OpenStreetMap / National Roadways',
         featureCount: mergedFeatures.length,
         zoom,
-        bbox: [minLng, minLat, maxLng, maxLat],
+        bbox: [clampedMinLng, clampedMinLat, clampedMaxLng, clampedMaxLat],
         status: mergedFeatures.length > 0 ? 'available' : 'unmapped',
+        isFallback: osmFeatures.length === 0 && mergedFeatures.length > 0,
+        message: mergedFeatures.length === 0 ? 'No mapped road vectors found in this viewport area.' : undefined,
         retrievedAt: new Date().toISOString(),
       },
     };
 
-    geospatialCache.set(cacheKey, result);
+    setRoadBoundsCache(cacheKey, result);
     return res.json(result);
   } catch (err: any) {
     console.error('Error serving /api/geo/roads-in-bounds:', err);
@@ -982,7 +1074,8 @@ interface OverpassRoadResult {
 async function queryOpenStreetMapRoads(
   boundingBox: [number, number, number, number] | undefined,
   center: [number, number] | undefined,
-  baseElevation: number = 25.0
+  baseElevation: number = 25.0,
+  zoom: number = 14
 ): Promise<OverpassRoadResult> {
   const [lng, lat] = center || [80.842, 16.212];
   let west = lng - 0.015;
@@ -993,9 +1086,9 @@ async function queryOpenStreetMapRoads(
   if (Array.isArray(boundingBox) && boundingBox.length === 4) {
     const [bWest, bSouth, bEast, bNorth] = boundingBox;
     if (isFinite(bWest) && isFinite(bSouth) && isFinite(bEast) && isFinite(bNorth)) {
-      // Buffer by 15% to capture connecting roads leading outside the boundary
-      const padLng = (bEast - bWest) * 0.15;
-      const padLat = (bNorth - bSouth) * 0.15;
+      // Buffer by 10% to capture connecting roads leading outside the boundary
+      const padLng = (bEast - bWest) * 0.10;
+      const padLat = (bNorth - bSouth) * 0.10;
       west = bWest - padLng;
       south = bSouth - padLat;
       east = bEast + padLng;
@@ -1003,16 +1096,28 @@ async function queryOpenStreetMapRoads(
 
       const spanLng = east - west;
       const spanLat = north - south;
-      if (spanLng > 0.06 || spanLat > 0.06) {
-        west = lng - 0.025;
-        east = lng + 0.025;
-        south = lat - 0.02;
-        north = lat + 0.02;
+      const maxSpan = zoom < 10 ? 1.5 : zoom < 14 ? 0.75 : 0.35;
+      if (spanLng > maxSpan || spanLat > maxSpan) {
+        const midLng = (west + east) / 2;
+        const midLat = (south + north) / 2;
+        const halfSpan = maxSpan / 2;
+        west = midLng - halfSpan;
+        east = midLng + halfSpan;
+        south = midLat - halfSpan;
+        north = midLat + halfSpan;
       }
     }
   }
 
-  const query = `[out:json][timeout:25];(way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track|living_street)"](${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(5)},${east.toFixed(5)}););out body geom;`;
+  // Adjust highway tag query filter based on zoom to ensure fast query times and appropriate detail
+  const highwayFilter =
+    zoom < 10
+      ? 'motorway|trunk|primary'
+      : zoom < 13
+      ? 'motorway|trunk|primary|secondary|tertiary'
+      : 'motorway|trunk|primary|secondary|tertiary|unclassified|residential|service|track|living_street';
+
+  const query = `[out:json][timeout:15];(way["highway"~"^(${highwayFilter})$"](${south.toFixed(5)},${west.toFixed(5)},${north.toFixed(5)},${east.toFixed(5)}););out body geom;`;
 
   const overpassMirrors = [
     'https://overpass-api.de/api/interpreter',
@@ -1026,7 +1131,7 @@ async function queryOpenStreetMapRoads(
   for (const mirror of overpassMirrors) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 18000);
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
       const resp = await fetch(`${mirror}?data=${encodeURIComponent(query)}`, {
         signal: controller.signal,
@@ -1105,15 +1210,13 @@ async function queryOpenStreetMapRoads(
               ? 'Bitumen/Asphalt'
               : 'Concrete (CC)');
 
-          const isEvacuation =
-            el.tags?.evacuation === 'yes' ||
-            ['motorway', 'trunk', 'primary', 'secondary', 'tertiary'].includes(highwayTag) ||
-            Boolean(el.tags?.name?.toLowerCase().includes('main') || el.tags?.name?.toLowerCase().includes('link'));
+          // Vetted evacuation corridor is strictly true only if explicitly designated in OSM tags
+          const isEvacuation = el.tags?.evacuation === 'yes';
 
           const nameTag =
             el.tags?.name ||
             el.tags?.['name:en'] ||
-            (el.tags?.ref ? `Highway Corridor (${el.tags.ref})` : `${roadClass} #${features.length + 1}`);
+            (el.tags?.ref ? `${highwayTag.toUpperCase()} (${el.tags.ref})` : roadClass);
 
           features.push({
             type: 'Feature',
@@ -1129,6 +1232,7 @@ async function queryOpenStreetMapRoads(
               width_m: ['motorway', 'trunk', 'primary'].includes(highwayTag) ? 7.5 : 5.0,
               elevation_m: baseElevation,
               isEvacuationCorridor: isEvacuation,
+              isCandidateRoute: false,
               length_m: Math.round(lengthM),
               source: 'OpenStreetMap Overpass API',
               retrievedAt: new Date().toISOString(),
@@ -1156,6 +1260,7 @@ async function queryOpenStreetMapRoads(
   return {
     features: [],
     status: 'request_failed',
+    source: 'OpenStreetMap',
     error: lastError,
   };
 }

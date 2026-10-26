@@ -199,6 +199,7 @@ const PerformanceDiagnosticsModal = React.lazy(() =>
   import('./components/diagnostics/PerformanceDiagnosticsModal').then((m) => ({ default: m.PerformanceDiagnosticsModal }))
 );
 import { SimpleTopNavbar, computeOverallStatus } from './components/dashboard/SimpleTopNavbar';
+import { GeographicBreadcrumbBar } from './components/dashboard/GeographicBreadcrumbBar';
 import { SimpleHazardSelector } from './components/hazard/SimpleHazardSelector';
 import { SimpleWeatherAndRiverCard } from './components/weather/SimpleWeatherAndRiverCard';
 import { SimpleFloodSimulationPanel } from './components/simulation/SimpleFloodSimulationPanel';
@@ -1835,23 +1836,74 @@ export default function App() {
         onOpenPerformance={() => setShowPerformanceModal(true)}
       />
 
+      {/* 2. Geographic Hierarchy Breadcrumb Bar (State > District > Mandal > Gram Panchayat) */}
+      <GeographicBreadcrumbBar
+        currentLocation={currentLocation}
+        onFitLocation={() => setCameraAction({ type: 'fit_village', timestamp: Date.now() })}
+        compositeRiskScore={hazardSummary?.compositeRiskScore}
+      />
+
       {/* Layout: Left Sidebar (Overview, Hazards, Simulation) & Right Main Map Area */}
       <div className="flex-1 flex min-h-0 overflow-hidden relative z-10">
 
         {/* Left Sidebar */}
         <aside
-          className={`fixed inset-y-0 left-0 top-14 z-40 w-72 sm:w-80 bg-white border-r border-slate-200 flex flex-col transition-all duration-200 shrink-0 ${
+          className={`fixed inset-y-0 left-0 top-[96px] z-40 w-72 sm:w-80 md:w-84 bg-white border-r border-slate-200 flex flex-col transition-all duration-200 shrink-0 ${
             isMobileSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full'
           } ${
             isDesktopSidebarOpen ? 'md:static md:translate-x-0' : 'md:hidden'
           }`}
         >
+          {/* Selected Location Card in Sidebar */}
+          <div className="p-3 border-b border-slate-200/90 bg-white shrink-0 select-none">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[10px] font-semibold text-blue-700 uppercase tracking-wider">
+                  <MapPin className="w-3 h-3 text-blue-600 shrink-0" />
+                  <span className="truncate">{currentLocation.district}, {currentLocation.state}</span>
+                </div>
+                <h1 className="text-sm font-bold text-slate-900 truncate mt-0.5" title={currentLocation.displayName || currentLocation.name}>
+                  {currentLocation.name}
+                </h1>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
+                {currentLocation.adminLevel === 'village' || currentLocation.adminLevel === 'gram_panchayat' ? 'GP' : 'Location'}
+              </span>
+            </div>
+
+            {/* Quick metadata strip */}
+            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-100 text-[11px] text-slate-600">
+              <div className="flex items-center gap-1">
+                <span className="text-slate-400">Risk Score:</span>
+                <span className={`font-bold ${
+                  (hazardSummary?.compositeRiskScore || 0) >= 70 ? 'text-red-700' :
+                  (hazardSummary?.compositeRiskScore || 0) >= 50 ? 'text-amber-700' : 'text-emerald-700'
+                }`}>
+                  {hazardSummary?.compositeRiskScore ?? '--'}/100
+                </span>
+              </div>
+              <span className="text-slate-300">·</span>
+              <div className="truncate">
+                <span className="text-slate-400">Terrain: </span>
+                <span className="font-medium text-slate-800 capitalize">{currentLocation.regionCategory || 'Plains'}</span>
+              </div>
+              {currentLocation.elevation_m !== undefined && (
+                <>
+                  <span className="text-slate-300">·</span>
+                  <div className="shrink-0 text-slate-500 font-mono text-[10px]">
+                    {currentLocation.elevation_m}m ASL
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
           {/* Sidebar Tab Navigation: Overview | Hazards | Simulate */}
           <div className="px-2.5 py-2 border-b border-slate-200 bg-slate-50 flex items-center justify-between shrink-0">
-            <div className="flex items-center gap-1 bg-slate-200/80 p-0.5 rounded-lg text-xs font-semibold">
+            <div className="flex items-center gap-1 bg-slate-200/80 p-0.5 rounded-lg text-xs font-semibold w-full">
               <button
                 onClick={() => setSidebarTab('overview')}
-                className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+                className={`flex-1 py-1 px-2 rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                   sidebarTab === 'overview'
                     ? 'bg-white text-blue-700 shadow-2xs font-bold'
                     : 'text-slate-600 hover:text-slate-900'
@@ -1864,7 +1916,7 @@ export default function App() {
 
               <button
                 onClick={() => setSidebarTab('hazards')}
-                className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+                className={`flex-1 py-1 px-2 rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                   sidebarTab === 'hazards'
                     ? 'bg-white text-blue-700 shadow-2xs font-bold'
                     : 'text-slate-600 hover:text-slate-900'
@@ -1877,12 +1929,12 @@ export default function App() {
 
               <button
                 onClick={() => setSidebarTab('simulate')}
-                className={`px-2.5 py-1 rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+                className={`flex-1 py-1 px-2 rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                   sidebarTab === 'simulate'
                     ? 'bg-white text-blue-700 shadow-2xs font-bold'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
-                title="Simulate Flood Inundation"
+                title="Simulate Flood Inundation & Multi-Hazard Scenarios"
               >
                 <Waves className="w-3.5 h-3.5 text-cyan-600" />
                 <span>Simulate</span>
@@ -1895,7 +1947,7 @@ export default function App() {
                 setIsMobileSidebarOpen(false);
                 setIsDesktopSidebarOpen(false);
               }}
-              className="p-1 text-slate-400 hover:text-slate-700 rounded-md cursor-pointer transition-colors"
+              className="p-1 text-slate-400 hover:text-slate-700 rounded-md cursor-pointer transition-colors ml-1.5"
               title="Collapse Sidebar"
             >
               <X className="w-4 h-4" />
@@ -1974,6 +2026,10 @@ export default function App() {
                   });
                 }}
                 onOpenCycloneTracking={() => setIsCycloneTrackingOpen(true)}
+                onSwitchToSimulate={(mode) => {
+                  if (mode) setActiveSimulationHazard(mode);
+                  setSidebarTab('simulate');
+                }}
               />
             )}
 
@@ -2032,7 +2088,7 @@ export default function App() {
         {isMobileSidebarOpen && (
           <div
             onClick={() => setIsMobileSidebarOpen(false)}
-            className="md:hidden fixed inset-0 top-14 bg-slate-900/40 backdrop-blur-2xs z-30"
+            className="md:hidden fixed inset-0 top-[96px] bg-slate-900/40 backdrop-blur-2xs z-30"
           />
         )}
 
