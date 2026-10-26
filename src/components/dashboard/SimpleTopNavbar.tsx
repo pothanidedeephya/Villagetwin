@@ -3,6 +3,7 @@ import {
   Globe,
   PanelLeft,
   Bell,
+  Menu,
   SlidersHorizontal,
   ChevronRight,
   ShieldCheck,
@@ -214,8 +215,8 @@ export const SimpleTopNavbar: React.FC<SimpleTopNavbarProps> = ({
               <span className="text-sm sm:text-base font-bold text-slate-900 tracking-tight leading-none">
                 Bharat Village Twin
               </span>
-              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-blue-50 text-blue-700 border border-blue-200 hidden sm:inline">
-                Digital Twin
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 uppercase tracking-wider hidden sm:inline-flex items-center gap-1 shadow-2xs">
+                All-India
               </span>
             </div>
           </div>
@@ -289,15 +290,15 @@ export const SimpleTopNavbar: React.FC<SimpleTopNavbarProps> = ({
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
               isMenuOpen
-                ? 'bg-slate-900 text-white border-slate-900'
-                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-900'
             }`}
-            title="Advanced Disaster Tools & Diagnostics"
+            title="Menu & Advanced Disaster Tools"
             aria-expanded={isMenuOpen}
-            aria-label="Advanced Tools Menu"
+            aria-label="Menu"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Advanced Tools</span>
+            <Menu className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Menu</span>
           </button>
 
           {/* Clean Advanced Tools Dropdown */}

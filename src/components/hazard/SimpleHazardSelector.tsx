@@ -322,6 +322,7 @@ interface SimpleHazardSelectorProps {
   onFocusWarning?: (hazard: HazardType, assessment: HazardAssessment) => void;
   onFocusCoordinates?: (coords: [number, number], label?: string) => void;
   onOpenCycloneTracking?: () => void;
+  onSwitchToSimulate?: (hazard?: 'flood' | 'cyclone') => void;
 }
 
 export const SimpleHazardSelector: React.FC<SimpleHazardSelectorProps> = ({
@@ -336,6 +337,7 @@ export const SimpleHazardSelector: React.FC<SimpleHazardSelectorProps> = ({
   onFocusWarning,
   onFocusCoordinates,
   onOpenCycloneTracking,
+  onSwitchToSimulate,
 }) => {
   const [expandedCardId, setExpandedCardId] = useState<string | null>(null);
 
@@ -463,11 +465,11 @@ export const SimpleHazardSelector: React.FC<SimpleHazardSelectorProps> = ({
                 key={card.id}
                 className={`rounded-xl border transition-all text-xs overflow-hidden ${
                   isSelected
-                    ? 'border-blue-600 bg-blue-50/30 shadow-xs ring-1 ring-blue-500'
-                    : 'border-slate-200/90 bg-white hover:border-slate-300 hover:bg-slate-50/50'
+                    ? 'border-blue-600 bg-blue-50/40 shadow-xs ring-1 ring-blue-500'
+                    : 'border-slate-200/90 bg-white hover:border-slate-300 hover:bg-slate-50/60 shadow-2xs'
                 }`}
               >
-                {/* Clickable Row */}
+                {/* Clickable Header Row */}
                 <button
                   type="button"
                   onClick={() => {
@@ -476,7 +478,7 @@ export const SimpleHazardSelector: React.FC<SimpleHazardSelectorProps> = ({
                       onFocusWarning(card.type, assessment);
                     }
                   }}
-                  className="w-full text-left p-2.5 flex items-center justify-between gap-2.5 cursor-pointer"
+                  className="w-full text-left p-2.5 pb-1.5 flex items-center justify-between gap-2.5 cursor-pointer"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div
@@ -511,6 +513,60 @@ export const SimpleHazardSelector: React.FC<SimpleHazardSelectorProps> = ({
                     <ChevronRight className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isSelected ? 'rotate-90 text-blue-600' : ''}`} />
                   </div>
                 </button>
+
+                {/* Description snippet */}
+                <div className="px-2.5 pb-2 text-[11px] text-slate-600 leading-snug line-clamp-2">
+                  {item.safetySentence || assessment?.baselineSusceptibility?.rationale || card.sublabel}
+                </div>
+
+                {/* Quick Actions Row */}
+                <div className="px-2.5 py-1.5 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between gap-1.5 text-[11px]">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectHazard(card.type);
+                        if (assessment && onFocusWarning) {
+                          onFocusWarning(card.type, assessment);
+                        }
+                      }}
+                      className="font-bold text-blue-700 hover:text-blue-900 flex items-center gap-1 cursor-pointer py-0.5 px-1.5 rounded hover:bg-blue-50 transition-colors"
+                      title={`View ${card.label} on map`}
+                    >
+                      <Navigation className="w-3 h-3 text-blue-600" />
+                      <span>View on Map</span>
+                    </button>
+
+                    {(card.type === 'flood' || card.type === 'cyclone') && onSwitchToSimulate && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSwitchToSimulate(card.type === 'flood' ? 'flood' : 'cyclone');
+                        }}
+                        className="font-bold text-cyan-700 hover:text-cyan-900 flex items-center gap-1 cursor-pointer py-0.5 px-1.5 rounded hover:bg-cyan-50 transition-colors"
+                        title={`Simulate ${card.label}`}
+                      >
+                        <Waves className="w-3 h-3 text-cyan-600" />
+                        <span>Simulate</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isSelected) {
+                        onSelectHazard('' as any);
+                      } else {
+                        onSelectHazard(card.type);
+                      }
+                    }}
+                    className="text-slate-500 hover:text-slate-800 font-medium py-0.5 px-1.5 rounded hover:bg-slate-200/60 transition-colors cursor-pointer"
+                  >
+                    {isSelected ? 'Less' : 'Details'}
+                  </button>
+                </div>
 
                 {/* Only the Selected Hazard Expands its Details */}
                 {isSelected && (
