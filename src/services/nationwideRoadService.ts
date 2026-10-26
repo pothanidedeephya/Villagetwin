@@ -35,15 +35,84 @@ export interface NationwideRoadResult {
   roads: FeatureCollection<LineString, RoadProperties>;
   featureCount: number;
   source: string;
-  status: 'available' | 'partial' | 'unmapped';
+  status: 'available' | 'partial' | 'unmapped' | 'error';
   zoom: number;
   retrievedAt: string;
+  isFallback?: boolean;
+  message?: string;
 }
 
-// In-memory spatial cache: key = `${tileX}_${tileY}_${zoomTier}`
-const viewportTileCache = new Map<string, Array<any>>();
-// Global feature registry to deduplicate features across tiles
-const loadedFeatureMap = new Map<string, any>();
+// In-memory spatial cache with bounded capacity and TTL
+interface TileCacheEntry {
+  features: Array<any>;
+  timestamp: number;
+}
+const MAX_TILE_CACHE_SIZE = 120;
+const TILE_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const viewportTileCache = new Map<string, TileCacheEntry>();
+
+/**
+ * Normalizes, validates and deduplicates raw road features.
+ * Filters out invalid geometries, single-point linestrings, and non-finite coordinates.
+ */
+export function normalizeAndDeduplicateRoads(rawFeatures: Array<any>): Array<any> {
+  if (!Array.isArray(rawFeatures)) return [];
+  const seenIds = new Set<string>();
+  const validFeatures: Array<any> = [];
+
+  for (const f of rawFeatures) {
+    if (!f || !f.geometry || !f.properties) continue;
+    const geomType = f.geometry.type;
+    if (geomType !== 'LineString' && geomType !== 'MultiLineString') continue;
+
+    const coords = f.geometry.coordinates;
+    if (!Array.isArray(coords) || coords.length === 0) continue;
+
+    // Validate coordinates
+    if (geomType === 'LineString') {
+      if (coords.length < 2) continue;
+      const hasInvalid = coords.some(
+        (pt: any) => !Array.isArray(pt) || pt.length < 2 || !isFinite(pt[0]) || !isFinite(pt[1])
+      );
+      if (hasInvalid) continue;
+    } else if (geomType === 'MultiLineString') {
+      const hasInvalid = coords.some(
+        (line: any) =>
+          !Array.isArray(line) ||
+          line.length < 2 ||
+          line.some((pt: any) => !Array.isArray(pt) || pt.length < 2 || !isFinite(pt[0]) || !isFinite(pt[1]))
+      );
+      if (hasInvalid) continue;
+    }
+
+    const fid = String(
+      f.properties.id ||
+      f.id ||
+      (geomType === 'LineString'
+        ? `rd_${coords[0][0].toFixed(5)}_${coords[0][1].toFixed(5)}_${coords[coords.length - 1][0].toFixed(5)}_${coords[coords.length - 1][1].toFixed(5)}`
+        : `rd_multi_${validFeatures.length + 1}`)
+    );
+
+    if (seenIds.has(fid)) continue;
+    seenIds.add(fid);
+
+    const highwayClass = classifyHighway(f.properties.highway || f.properties.highwayTag, f.properties.roadType);
+
+    validFeatures.push({
+      ...f,
+      id: fid,
+      properties: {
+        ...f.properties,
+        id: fid,
+        highwayClass,
+        isEvacuationCorridor: Boolean(f.properties.isEvacuationCorridor),
+        isCandidateRoute: Boolean(f.properties.isCandidateRoute),
+      },
+    });
+  }
+
+  return validFeatures;
+}
 
 /**
  * Rounds coordinate to a 0.05-degree spatial tile index (~5.5 km resolution)
@@ -114,38 +183,67 @@ export function padBounds(bounds: ViewportBounds, paddingFraction = 0.18): Viewp
 
 /**
  * Queries the backend road API for the visible map viewport.
- * Falls back gracefully to benchmark network extracts or local client-side road models if offline.
+ * Falls back gracefully to benchmark network extracts or curated road models if offline.
  */
 export async function fetchRoadsForViewport(
   bounds: ViewportBounds,
   zoom: number,
   signal?: AbortSignal
 ): Promise<NationwideRoadResult> {
+  // Validate input bounds
+  if (
+    !bounds ||
+    !isFinite(bounds.minLng) ||
+    !isFinite(bounds.minLat) ||
+    !isFinite(bounds.maxLng) ||
+    !isFinite(bounds.maxLat) ||
+    bounds.minLng >= bounds.maxLng ||
+    bounds.minLat >= bounds.maxLat
+  ) {
+    return {
+      roads: { type: 'FeatureCollection', features: [] },
+      featureCount: 0,
+      source: 'Invalid Viewport',
+      status: 'error',
+      zoom,
+      retrievedAt: new Date().toISOString(),
+      message: 'Invalid viewport bounding box parameters provided.',
+    };
+  }
+
   const padded = padBounds(bounds, 0.15);
   const zoomTier = getZoomTier(zoom);
 
-  // Check if tile is cached
+  // Check if tile is cached and valid
   const centerLng = (bounds.minLng + bounds.maxLng) / 2;
   const centerLat = (bounds.minLat + bounds.maxLat) / 2;
   const tileKey = getTileKey(centerLng, centerLat, zoomTier);
 
-  if (viewportTileCache.has(tileKey)) {
+  const cached = viewportTileCache.get(tileKey);
+  if (cached && Date.now() - cached.timestamp < TILE_CACHE_TTL_MS) {
     performanceTracker.recordCacheHit('road_tiles', tileKey);
-    const cachedFeatures = viewportTileCache.get(tileKey)!;
     return {
       roads: {
         type: 'FeatureCollection',
-        features: cachedFeatures,
+        features: cached.features,
       },
-      featureCount: cachedFeatures.length,
+      featureCount: cached.features.length,
       source: 'OpenStreetMap Cache',
-      status: cachedFeatures.length > 0 ? 'available' : 'unmapped',
+      status: cached.features.length > 0 ? 'available' : 'unmapped',
       zoom,
       retrievedAt: new Date().toISOString(),
     };
   }
 
   performanceTracker.recordCacheMiss('road_tiles', tileKey);
+
+  const setTileInCache = (features: Array<any>) => {
+    if (viewportTileCache.size >= MAX_TILE_CACHE_SIZE) {
+      const oldestKey = viewportTileCache.keys().next().value;
+      if (oldestKey) viewportTileCache.delete(oldestKey);
+    }
+    viewportTileCache.set(tileKey, { features, timestamp: Date.now() });
+  };
 
   try {
     const queryParams = new URLSearchParams({
@@ -166,19 +264,9 @@ export async function fetchRoadsForViewport(
     if (res.ok) {
       const data = await res.json();
       const rawFeatures: Array<any> = data.features || [];
+      const validFeatures = normalizeAndDeduplicateRoads(rawFeatures);
 
-      // Deduplicate features against global feature map
-      const validFeatures = rawFeatures.filter((f) => {
-        if (!f || !f.geometry || !f.properties) return false;
-        const fid = f.properties.id || `${f.geometry.coordinates?.[0]?.[0]}-${f.geometry.coordinates?.[0]?.[1]}`;
-        if (loadedFeatureMap.has(fid)) {
-          return true;
-        }
-        loadedFeatureMap.set(fid, f);
-        return true;
-      });
-
-      viewportTileCache.set(tileKey, validFeatures);
+      setTileInCache(validFeatures);
 
       return {
         roads: {
@@ -190,6 +278,7 @@ export async function fetchRoadsForViewport(
         status: validFeatures.length > 0 ? 'available' : 'unmapped',
         zoom,
         retrievedAt: new Date().toISOString(),
+        isFallback: Boolean(data.metadata?.isFallback),
       };
     }
   } catch (err: any) {
@@ -227,18 +316,20 @@ export async function fetchRoadsForViewport(
     });
   });
 
-  viewportTileCache.set(tileKey, fallbackFeatures);
+  const normalizedFallback = normalizeAndDeduplicateRoads(fallbackFeatures);
+  setTileInCache(normalizedFallback);
 
   return {
     roads: {
       type: 'FeatureCollection',
-      features: fallbackFeatures,
+      features: normalizedFallback,
     },
-    featureCount: fallbackFeatures.length,
-    source: fallbackFeatures.length > 0 ? 'Verified Indian Roadway Catalog' : 'OpenStreetMap (No vectors in viewport)',
-    status: fallbackFeatures.length > 0 ? 'available' : 'unmapped',
+    featureCount: normalizedFallback.length,
+    source: normalizedFallback.length > 0 ? 'Verified Indian Roadway Catalog' : 'OpenStreetMap (No vectors in viewport)',
+    status: normalizedFallback.length > 0 ? 'available' : 'unmapped',
     zoom,
     retrievedAt: new Date().toISOString(),
+    isFallback: true,
   };
 }
 
@@ -247,7 +338,6 @@ export async function fetchRoadsForViewport(
  */
 export function clearRoadViewportCache(): void {
   viewportTileCache.clear();
-  loadedFeatureMap.clear();
 }
 
 performanceTracker.registerCacheProvider({

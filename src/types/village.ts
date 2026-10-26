@@ -60,6 +60,10 @@ export interface RoadProperties {
   source?: string;
   currentDepth_m?: number;
   isImpassable?: boolean;
+  highwayClass?: 'national_highway' | 'state_highway' | 'major_road' | 'local_rural' | 'track_service';
+  isCandidateRoute?: boolean;
+  validationStatus?: 'vetted' | 'candidate' | 'unvalidated';
+  hazardIntersection?: boolean;
   [key: string]: any;
 }
 
